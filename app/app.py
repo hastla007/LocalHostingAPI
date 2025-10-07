@@ -1625,11 +1625,6 @@ def download(file_id: str):
     if not record:
         lifecycle_logger.warning("file_download_missing file_id=%s", file_id)
         abort(404)
-    if record["expires_at"] < time.time():
-        lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
-        abort(404)
-    lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     file_path = get_storage_path(file_id, record["stored_name"])
     if not file_path.exists():
         lifecycle_logger.warning(
@@ -1638,6 +1633,11 @@ def download(file_id: str):
             sanitize_log_value(record["stored_name"]),
         )
         abort(404)
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        abort(404)
+    lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
         return send_file(
             file_path,
@@ -1659,10 +1659,6 @@ def direct_download(file_id: str, filename: str):
     if not record:
         lifecycle_logger.warning("file_direct_missing file_id=%s", file_id)
         abort(404)
-    if record["expires_at"] < time.time():
-        lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
-        abort(404)
     if not compare_digest(filename, record["original_name"]):
         lifecycle_logger.warning(
             "file_direct_name_mismatch file_id=%s requested=%s stored=%s",
@@ -1671,8 +1667,6 @@ def direct_download(file_id: str, filename: str):
             sanitize_log_value(record["original_name"]),
         )
         abort(404)
-
-    lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     file_path = get_storage_path(file_id, record["stored_name"])
     if not file_path.exists():
         lifecycle_logger.warning(
@@ -1681,6 +1675,11 @@ def direct_download(file_id: str, filename: str):
             sanitize_log_value(record["stored_name"]),
         )
         abort(404)
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        abort(404)
+    lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     try:
         return send_file(
             file_path,
@@ -1966,12 +1965,6 @@ def box_download_file(file_id: str):
     if not record:
         lifecycle_logger.warning("box_download_missing file_id=%s", file_id)
         return _box_error("not_found", "File not found.", status=404)
-
-    if record["expires_at"] < time.time():
-        lifecycle_logger.info("box_download_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
-        return _box_error("expired", "The requested file has expired.", status=404)
-
     file_path = get_storage_path(record["id"], record["stored_name"])
     if not file_path.exists():
         lifecycle_logger.warning(
@@ -1980,6 +1973,11 @@ def box_download_file(file_id: str):
             sanitize_log_value(record["stored_name"]),
         )
         return _box_error("not_found", "File content is unavailable.", status=404)
+
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("box_download_blocked_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        return _box_error("expired", "The requested file has expired.", status=404)
 
     lifecycle_logger.info("file_downloaded_box file_id=%s", file_id)
     mimetype = record["content_type"]
@@ -2066,6 +2064,14 @@ def serve_raw_file(direct_path: str):
             "file_raw_missing direct_path=%s", sanitize_log_value(normalized)
         )
         abort(404)
+    file_path = get_storage_path(record["id"], record["stored_name"])
+    if not file_path.exists():
+        lifecycle_logger.warning(
+            "file_raw_missing_path file_id=%s stored_name=%s",
+            record["id"],
+            sanitize_log_value(record["stored_name"]),
+        )
+        abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info(
             "file_raw_blocked_expired file_id=%s direct_path=%s",
@@ -2080,14 +2086,6 @@ def serve_raw_file(direct_path: str):
         record["id"],
         sanitize_log_value(normalized),
     )
-    file_path = get_storage_path(record["id"], record["stored_name"])
-    if not file_path.exists():
-        lifecycle_logger.warning(
-            "file_raw_missing_path file_id=%s stored_name=%s",
-            record["id"],
-            sanitize_log_value(record["stored_name"]),
-        )
-        abort(404)
     mimetype = record["content_type"] or None
     try:
         return send_file(
