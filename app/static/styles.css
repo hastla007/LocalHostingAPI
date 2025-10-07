@@ -87,6 +87,14 @@ main {
   font-size: 0.9rem;
 }
 
+.button.icon-only {
+  padding: 0.5rem;
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  justify-content: center;
+  gap: 0;
+}
+
 .button:hover {
   background: #1d4ed8;
 }
@@ -162,10 +170,100 @@ main {
   margin-bottom: 1rem;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.drop-zone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed #94a3b8;
+  border-radius: 16px;
+  padding: 2rem 1.5rem;
+  background: #f8fafc;
+  color: #0f172a;
+  text-align: center;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+  cursor: pointer;
+  min-height: 200px;
+}
+
+.drop-zone:focus,
+.drop-zone:focus-visible,
+.drop-zone:focus-within {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.2);
+}
+
+.drop-zone.dragover {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.drop-zone.has-file {
+  border-style: solid;
+  border-color: #34d399;
+  background: #ecfdf5;
+}
+
+.drop-zone-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 360px;
+}
+
+.drop-zone-icon {
+  font-size: 2.5rem;
+}
+
+.drop-zone-text {
+  color: #475569;
+  margin: 0;
+}
+
+.drop-zone-file {
+  margin: 0;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.drop-zone-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.drop-zone-trigger .icon {
+  font-size: 1.2rem;
+}
+
 .form-row {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.form-row-actions {
+  align-items: stretch;
+}
+
+.form-row-actions .button {
+  align-self: flex-end;
+  height: 48px;
+  width: 48px;
 }
 
 .form-control {
@@ -257,6 +355,14 @@ input[type="number"] {
   .form-row {
     flex-direction: row;
     align-items: flex-end;
+  }
+
+  .form-row-actions {
+    gap: 1rem;
+  }
+
+  .form-row-actions .button {
+    align-self: flex-end;
   }
 
   .form-control {

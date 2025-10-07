@@ -3,11 +3,25 @@
   <section class="card upload-card">
     <h2>Upload a File</h2>
     <form id="upload-form" class="upload-form" method="post" action="{{ url_for('fileupload') }}" enctype="multipart/form-data">
-      <div class="form-row">
-        <label class="form-control">
-          <span>File</span>
-          <input type="file" name="file" required />
-        </label>
+      <div
+        id="drop-zone"
+        class="drop-zone"
+        tabindex="0"
+        role="button"
+        aria-label="Select or drop a file to upload"
+        aria-describedby="drop-zone-instructions drop-zone-filename"
+      >
+        <input id="file-input" type="file" name="file" required class="visually-hidden" />
+        <div class="drop-zone-body">
+          <span class="drop-zone-icon" aria-hidden="true">📁</span>
+          <button type="button" class="button secondary drop-zone-trigger" id="file-select-button">
+            Select a File
+          </button>
+          <p id="drop-zone-instructions" class="drop-zone-text">…or drag and drop a file anywhere in this area.</p>
+          <p id="drop-zone-filename" class="drop-zone-file" aria-live="polite"></p>
+        </div>
+      </div>
+      <div class="form-row form-row-actions">
         <label class="form-control">
           <span>Retention (hours)</span>
           <input
@@ -21,11 +35,15 @@
           />
           <small>Allowed: {{ config.retention_min_hours|round(2) }}&ndash;{{ config.retention_max_hours|round(2) }} hours</small>
         </label>
+        <button
+          type="submit"
+          class="button primary icon-only"
+          title="Upload file"
+          aria-label="Upload file"
+        >
+          <span class="icon" aria-hidden="true">⬆️</span>
+        </button>
       </div>
-      <button type="submit" class="button primary">
-        <span class="icon" aria-hidden="true">⬆️</span>
-        <span class="label">Upload</span>
-      </button>
     </form>
     <div id="upload-progress" class="progress hidden" aria-hidden="true">
       <div id="upload-progress-bar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
@@ -59,34 +77,44 @@
               <td>{{ file.expires_at|human_datetime }}</td>
               <td class="time-remaining">{{ file.remaining_seconds|human_timedelta }}</td>
               <td>
-                <a href="{{ file.download_url }}" class="button">
+                <a
+                  href="{{ file.download_url }}"
+                  class="button icon-only"
+                  title="Download file"
+                  aria-label="Download file"
+                >
                   <span class="icon" aria-hidden="true">⬇️</span>
-                  <span class="label">Download</span>
                 </a>
                 <a
                   href="{{ file.direct_download_url }}"
-                  class="button secondary"
+                  class="button secondary icon-only"
+                  title="Open direct link"
+                  aria-label="Open direct link"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
                   <span class="icon" aria-hidden="true">🔗</span>
-                  <span class="label">Direct Link</span>
                 </a>
                 {% if file.raw_download_url %}
                   <a
                     href="{{ file.raw_download_url }}"
-                    class="button secondary"
+                    class="button secondary icon-only"
+                    title="Open raw URL"
+                    aria-label="Open raw URL"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
                     <span class="icon" aria-hidden="true">🌐</span>
-                    <span class="label">Raw URL</span>
                   </a>
                 {% endif %}
                 <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
-                  <button type="submit" class="button danger">
+                  <button
+                    type="submit"
+                    class="button danger icon-only"
+                    title="Delete file"
+                    aria-label="Delete file"
+                  >
                     <span class="icon" aria-hidden="true">🗑️</span>
-                    <span class="label">Delete</span>
                   </button>
                 </form>
               </td>
@@ -112,6 +140,12 @@
       const progressContainer = document.getElementById('upload-progress');
       const progressBar = document.getElementById('upload-progress-bar');
       const submitButton = form.querySelector('button[type="submit"]');
+      const fileInput = document.getElementById('file-input');
+      const dropZone = document.getElementById('drop-zone');
+      const dropZoneFileName = document.getElementById('drop-zone-filename');
+      const fileSelectButton = document.getElementById('file-select-button');
+      const retentionInput = form.querySelector('input[name="retention_hours"]');
+      let lastDroppedFile = null;
 
       const resetProgress = () => {
         progressBar.style.width = '0%';
@@ -143,20 +177,39 @@
         });
       };
 
-      form.addEventListener('submit', function (event) {
-        event.preventDefault();
-        const fileInput = form.querySelector('input[type="file"]');
-        if (!fileInput.files || !fileInput.files.length) {
+      const updateDropZoneState = (filename) => {
+        if (!dropZone || !dropZoneFileName) {
+          return;
+        }
+        if (filename) {
+          dropZoneFileName.textContent = `Selected: ${filename}`;
+          dropZone.classList.add('has-file');
+        } else {
+          dropZoneFileName.textContent = '';
+          dropZone.classList.remove('has-file');
+        }
+      };
+
+      const handleUpload = (fileOverride) => {
+        const activeFile = fileOverride || (fileInput && fileInput.files && fileInput.files[0]) || lastDroppedFile;
+        if (!activeFile) {
           showStatus('Select a file to upload.', 'error');
           return;
         }
 
         const formData = new FormData(form);
+        if (activeFile) {
+          formData.delete('file');
+          formData.append('file', activeFile, activeFile.name);
+        }
         const xhr = new XMLHttpRequest();
         xhr.open('POST', form.action, true);
 
         xhr.upload.addEventListener('loadstart', () => {
           submitButton.disabled = true;
+          if (retentionInput) {
+            retentionInput.setAttribute('aria-busy', 'true');
+          }
           progressContainer.classList.remove('hidden');
           progressBar.style.width = '0%';
           progressBar.setAttribute('aria-valuenow', '0');
@@ -175,6 +228,9 @@
 
         xhr.addEventListener('error', () => {
           submitButton.disabled = false;
+          if (retentionInput) {
+            retentionInput.removeAttribute('aria-busy');
+          }
           showStatus('Network error during upload.', 'error');
           resetProgress();
         });
@@ -184,6 +240,9 @@
             return;
           }
           submitButton.disabled = false;
+          if (retentionInput) {
+            retentionInput.removeAttribute('aria-busy');
+          }
           let response;
           try {
             response = JSON.parse(xhr.responseText || '{}');
@@ -211,6 +270,8 @@
             progressBar.style.width = '100%';
             progressBar.setAttribute('aria-valuenow', '100');
             form.reset();
+            lastDroppedFile = null;
+            updateDropZoneState();
             setTimeout(() => {
               window.location.reload();
             }, 1200);
@@ -222,7 +283,125 @@
         };
 
         xhr.send(formData);
+      };
+
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        handleUpload();
       });
+
+      const setFileSelection = (file, { autoUpload } = { autoUpload: false }) => {
+        if (!file) {
+          updateDropZoneState();
+          lastDroppedFile = null;
+          return;
+        }
+
+        let assigned = false;
+        if (fileInput && 'files' in fileInput) {
+          try {
+            if (typeof DataTransfer !== 'undefined') {
+              const dataTransfer = new DataTransfer();
+              dataTransfer.items.add(file);
+              fileInput.files = dataTransfer.files;
+              assigned = true;
+            }
+          } catch (error) {
+            assigned = false;
+          }
+        }
+
+        lastDroppedFile = assigned ? null : file;
+        updateDropZoneState(file.name);
+        if (autoUpload) {
+          handleUpload(file);
+        }
+      };
+
+      if (fileInput) {
+        fileInput.addEventListener('change', (event) => {
+          const files = event.target.files;
+          const file = files && files.length ? files[0] : null;
+          lastDroppedFile = null;
+          if (!file) {
+            updateDropZoneState();
+            return;
+          }
+          updateDropZoneState(file.name);
+        });
+      }
+
+      if (fileSelectButton && fileInput) {
+        fileSelectButton.addEventListener('click', () => {
+          fileInput.click();
+        });
+      }
+
+      if (dropZone) {
+        const preventDefaults = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        };
+
+        ['dragenter', 'dragover'].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            preventDefaults(event);
+            dropZone.classList.add('dragover');
+          });
+        });
+
+        ['dragleave', 'dragend', 'drop'].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            if (eventName !== 'drop') {
+              preventDefaults(event);
+            }
+            if (
+              eventName === 'dragleave' &&
+              event.relatedTarget &&
+              dropZone.contains(event.relatedTarget)
+            ) {
+              return;
+            }
+            dropZone.classList.remove('dragover');
+          });
+        });
+
+        dropZone.addEventListener('drop', (event) => {
+          preventDefaults(event);
+          dropZone.classList.remove('dragover');
+          const files = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files : null;
+          if (!files || !files.length) {
+            return;
+          }
+
+          if (files.length > 1) {
+            showStatus('Only the first file will be uploaded.', 'info');
+          }
+
+          const [file] = files;
+          setFileSelection(file, { autoUpload: true });
+        });
+
+        dropZone.addEventListener('click', (event) => {
+          if (event.target.closest('button')) {
+            return;
+          }
+          if (fileInput) {
+            fileInput.click();
+          }
+        });
+
+        dropZone.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (fileInput) {
+              fileInput.click();
+            }
+          }
+        });
+      }
+
+      updateDropZoneState();
     });
   </script>
 {% endblock %}
