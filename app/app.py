@@ -2,6 +2,7 @@ import atexit
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import secrets
 import shutil
@@ -193,14 +194,50 @@ def _load_secret_key() -> str:
         logging.warning("Generated new secret key - stored in %s", secret_path)
         return generated
     except OSError as error:
-        logging.getLogger("localhosting.config").warning(
-            "Falling back to in-memory secret key: %s", error
+        logging.getLogger("localhosting.config").critical(
+            "SECURITY WARNING: Using in-memory secret key. Sessions will not persist across restarts. "
+            "Set SECRET_KEY environment variable for production use. Error: %s",
+            error,
         )
         return secrets.token_hex(32)
 
 
 _SECRET_KEY_VALUE: Optional[str] = None
 _api_key_serializer: Optional[URLSafeSerializer] = None
+
+
+def sanitize_log_value(value: Any) -> Any:
+    """Remove control characters from log values to prevent log injection."""
+
+    if isinstance(value, str):
+        return (
+            value.replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+    return value
+
+
+def validate_upload_mimetype(filename: str, declared_type: Optional[str]) -> bool:
+    """Check for suspicious mismatches between filename and declared type."""
+
+    if not filename or not declared_type:
+        return True
+
+    guessed_type, _ = mimetypes.guess_type(filename)
+    if not guessed_type:
+        return True
+
+    declared_major = declared_type.split("/", 1)[0].lower()
+    guessed_major = guessed_type.split("/", 1)[0].lower()
+
+    if declared_major == "text" or guessed_major == "text":
+        return True
+
+    if declared_major == "application" or guessed_major == "application":
+        return True
+
+    return declared_major == guessed_major
 
 
 def get_secret_key_value() -> str:
@@ -663,7 +700,7 @@ def log_request_completion(response: Response):
     lifecycle_logger.info(
         "request_completed method=%s path=%s status=%d size=%s",
         request.method,
-        request.path,
+        sanitize_log_value(request.path),
         response.status_code,
         response.calculate_content_length() if hasattr(response, "calculate_content_length") else response.content_length or 0,
     )
@@ -822,6 +859,11 @@ def resolve_retention(config: dict, *candidates: Optional[str]) -> float:
 
     try:
         retention = float(chosen)
+
+        if retention != retention:  # NaN guard
+            raise ValueError("NaN not allowed")
+        if not (0 <= retention <= 8760):
+            raise ValueError("Retention must be between 0 and 8760 hours")
     except (TypeError, ValueError) as error:
         raise RetentionValidationError(
             "Invalid retention_hours value",
@@ -968,8 +1010,12 @@ def health_check():
     except Exception:
         db_healthy = False
 
-    usage = shutil.disk_usage(UPLOADS_DIR)
-    disk_free_gb = usage.free / (1024 ** 3)
+    try:
+        usage = shutil.disk_usage(UPLOADS_DIR)
+        disk_free_gb = usage.free / (1024 ** 3)
+    except (FileNotFoundError, OSError):
+        disk_free_gb = 0
+        db_healthy = False
     status = "healthy" if db_healthy and disk_free_gb > 1 else "unhealthy"
     code = 200 if status == "healthy" else 503
 
@@ -1091,10 +1137,20 @@ def logs_data():
 def hosting_delete(file_id: str):
     if delete_file(file_id):
         flash("File deleted successfully.", "success")
-        lifecycle_logger.info("file_deleted file_id=%s", file_id)
+        lifecycle_logger.info(
+            "file_deleted_manual file_id=%s user=%s ip=%s",
+            file_id,
+            sanitize_log_value(session.get("ui_username", "anonymous")),
+            request.remote_addr or "unknown",
+        )
     else:
         flash("File not found.", "error")
-        lifecycle_logger.warning("file_delete_missing file_id=%s", file_id)
+        lifecycle_logger.warning(
+            "file_delete_missing file_id=%s user=%s ip=%s",
+            file_id,
+            sanitize_log_value(session.get("ui_username", "anonymous")),
+            request.remote_addr or "unknown",
+        )
     return redirect(url_for("hosting"))
 
 
@@ -1239,7 +1295,11 @@ def settings():
             get_config(refresh=True)
             refreshed = True
 
-            lifecycle_logger.info("api_key_generated id=%s label=%s", new_key["id"], label or "")
+            lifecycle_logger.info(
+                "api_key_generated id=%s label=%s",
+                new_key["id"],
+                sanitize_log_value(label or ""),
+            )
             if new_key_raw:
                 session["last_generated_api_key"] = new_key_raw
                 flash(f"Generated new API key: {new_key_raw}", "success")
@@ -1365,6 +1425,12 @@ def fileupload():
                     "upload_failed reason=invalid_filename original=%s", upload.filename
                 )
                 return jsonify({"error": "Invalid filename"}), 400
+            if not validate_upload_mimetype(filename, upload.content_type):
+                lifecycle_logger.warning(
+                    "upload_suspicious_mimetype filename=%s declared=%s",
+                    sanitize_log_value(filename),
+                    upload.content_type,
+                )
             if max_bytes and upload.content_length and upload.content_length > max_bytes:
                 size_failures.append(
                     {
@@ -1451,7 +1517,9 @@ def fileupload():
                 )
             except Exception as error:
                 lifecycle_logger.exception(
-                    "file_upload_failed file_id=%s filename=%s", file_id, filename
+                    "file_upload_failed file_id=%s filename=%s",
+                    file_id,
+                    sanitize_log_value(filename),
                 )
                 if hasattr(upload, "stream") and hasattr(upload.stream, "close"):
                     try:
@@ -1475,7 +1543,9 @@ def fileupload():
             record = get_file(file_id)
             if not record:
                 lifecycle_logger.error(
-                    "file_registration_failed file_id=%s filename=%s", file_id, filename
+                    "file_registration_failed file_id=%s filename=%s",
+                    file_id,
+                    sanitize_log_value(filename),
                 )
                 if upload_path and upload_path.exists():
                     upload_path.unlink(missing_ok=True)
@@ -1504,7 +1574,7 @@ def fileupload():
             lifecycle_logger.info(
                 "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
                 file_id,
-                filename,
+                sanitize_log_value(filename),
                 size,
                 retention_hours,
             )
@@ -1563,7 +1633,9 @@ def download(file_id: str):
     file_path = get_storage_path(file_id, record["stored_name"])
     if not file_path.exists():
         lifecycle_logger.warning(
-            "file_download_missing_path file_id=%s stored_name=%s", file_id, record["stored_name"]
+            "file_download_missing_path file_id=%s stored_name=%s",
+            file_id,
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
     try:
@@ -1574,7 +1646,9 @@ def download(file_id: str):
         )
     except FileNotFoundError:
         lifecycle_logger.warning(
-            "file_download_missing_race file_id=%s stored_name=%s", file_id, record["stored_name"]
+            "file_download_missing_race file_id=%s stored_name=%s",
+            file_id,
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
 
@@ -1593,8 +1667,8 @@ def direct_download(file_id: str, filename: str):
         lifecycle_logger.warning(
             "file_direct_name_mismatch file_id=%s requested=%s stored=%s",
             file_id,
-            filename,
-            record["original_name"],
+            sanitize_log_value(filename),
+            sanitize_log_value(record["original_name"]),
         )
         abort(404)
 
@@ -1604,7 +1678,7 @@ def direct_download(file_id: str, filename: str):
         lifecycle_logger.warning(
             "file_direct_missing_path file_id=%s stored_name=%s",
             file_id,
-            record["stored_name"],
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
     try:
@@ -1617,7 +1691,7 @@ def direct_download(file_id: str, filename: str):
         lifecycle_logger.warning(
             "file_direct_missing_race file_id=%s stored_name=%s",
             file_id,
-            record["stored_name"],
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
 
@@ -1729,29 +1803,37 @@ def box_upload_files():
                 except (OSError, IOError):
                     pass
 
+            if not validate_upload_mimetype(filename, upload.content_type):
+                lifecycle_logger.warning(
+                    "box_upload_suspicious_mimetype filename=%s declared=%s",
+                    sanitize_log_value(filename),
+                    upload.content_type,
+                )
+
             try:
-                with temp_path.open("wb") as destination:
-                    while True:
-                        chunk = upload.stream.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        destination.write(chunk)
-                        hash_sha1.update(chunk)
-                        written += len(chunk)
-                        if max_bytes and written > max_bytes:
-                            raise ValueError("file too large")
+                try:
+                    with temp_path.open("wb") as destination:
+                        while True:
+                            chunk = upload.stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            destination.write(chunk)
+                            hash_sha1.update(chunk)
+                            written += len(chunk)
+                            if max_bytes and written > max_bytes:
+                                raise ValueError("file too large")
 
-                temp_path.replace(upload_path)
-                size = written if written else upload_path.stat().st_size
-                if max_bytes and size > max_bytes:
-                    raise ValueError("file too large")
-                content_type = upload.content_type
-
-                if hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
+                    temp_path.replace(upload_path)
+                    size = written if written else upload_path.stat().st_size
+                    if max_bytes and size > max_bytes:
+                        raise ValueError("file too large")
+                    content_type = upload.content_type
+                finally:
+                    if hasattr(upload.stream, "close"):
+                        try:
+                            upload.stream.close()
+                        except OSError:
+                            pass
 
                 file_id = register_file(
                     original_name=filename,
@@ -1779,7 +1861,8 @@ def box_upload_files():
                 )
             except Exception as error:
                 lifecycle_logger.exception(
-                    "box_upload_failed reason=internal_error filename=%s", filename
+                    "box_upload_failed reason=internal_error filename=%s",
+                    sanitize_log_value(filename),
                 )
                 if temp_path.exists():
                     temp_path.unlink(missing_ok=True)
@@ -1804,7 +1887,8 @@ def box_upload_files():
                     prune_empty_upload_dirs(upload_path.parent)
                 remove_orphaned_record(file_id)
                 lifecycle_logger.error(
-                    "box_upload_failed reason=registration_missing file_id=%s", file_id
+                    "box_upload_failed reason=registration_missing file_id=%s",
+                    file_id,
                 )
                 return _box_error(
                     "internal_error",
@@ -1862,7 +1946,7 @@ def box_upload_files():
             lifecycle_logger.info(
                 "file_uploaded_box file_id=%s filename=%s size=%d retention_hours=%.2f",
                 file_id,
-                record["original_name"],
+                sanitize_log_value(record["original_name"]),
                 size,
                 retention_hours,
             )
@@ -1893,7 +1977,7 @@ def box_download_file(file_id: str):
         lifecycle_logger.warning(
             "box_download_missing_path file_id=%s stored_name=%s",
             file_id,
-            record["stored_name"],
+            sanitize_log_value(record["stored_name"]),
         )
         return _box_error("not_found", "File content is unavailable.", status=404)
 
@@ -1908,7 +1992,9 @@ def box_download_file(file_id: str):
         )
     except FileNotFoundError:
         lifecycle_logger.warning(
-            "box_download_missing_race file_id=%s stored_name=%s", file_id, record["stored_name"]
+            "box_download_missing_race file_id=%s stored_name=%s",
+            file_id,
+            sanitize_log_value(record["stored_name"]),
         )
         return _box_error("not_found", "File not found.", status=404)
 
@@ -1976,37 +2062,45 @@ def serve_raw_file(direct_path: str):
     if not record:
         if first_segment_lower in RESERVED_ROUTE_ENDPOINTS:
             abort(404)
-        lifecycle_logger.warning("file_raw_missing direct_path=%s", normalized)
+        lifecycle_logger.warning(
+            "file_raw_missing direct_path=%s", sanitize_log_value(normalized)
+        )
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info(
             "file_raw_blocked_expired file_id=%s direct_path=%s",
             record["id"],
-            normalized,
+            sanitize_log_value(normalized),
         )
         cleanup_expired_files()
         abort(404)
 
     lifecycle_logger.info(
-        "file_raw_downloaded file_id=%s direct_path=%s", record["id"], normalized
+        "file_raw_downloaded file_id=%s direct_path=%s",
+        record["id"],
+        sanitize_log_value(normalized),
     )
     file_path = get_storage_path(record["id"], record["stored_name"])
     if not file_path.exists():
         lifecycle_logger.warning(
-            "file_raw_missing_path file_id=%s stored_name=%s", record["id"], record["stored_name"]
+            "file_raw_missing_path file_id=%s stored_name=%s",
+            record["id"],
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
+    mimetype = record["content_type"] or None
     try:
         return send_file(
             file_path,
             as_attachment=False,
             download_name=record["original_name"],
+            mimetype=mimetype,
         )
     except FileNotFoundError:
         lifecycle_logger.warning(
             "file_raw_missing_race file_id=%s stored_name=%s",
             record["id"],
-            record["stored_name"],
+            sanitize_log_value(record["stored_name"]),
         )
         abort(404)
 
@@ -2073,6 +2167,15 @@ def s3_multipart_upload(bucket: str):
                 or f"upload-{uuid.uuid4().hex}"
             )
 
+        if not validate_upload_mimetype(filename, upload.content_type):
+            lifecycle_logger.warning(
+                "s3_upload_suspicious_mimetype bucket=%s key=%s filename=%s declared=%s",
+                bucket,
+                sanitize_log_value(key),
+                sanitize_log_value(filename),
+                upload.content_type,
+            )
+
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
         upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
@@ -2087,37 +2190,34 @@ def s3_multipart_upload(bucket: str):
                 pass
 
         try:
-            with temp_path.open("wb") as destination:
-                while True:
-                    chunk = upload.stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    destination.write(chunk)
-                    hash_md5.update(chunk)
-                    written += len(chunk)
-                    if max_bytes and written > max_bytes:
-                        raise ValueError("file too large")
+            try:
+                with temp_path.open("wb") as destination:
+                    while True:
+                        chunk = upload.stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        hash_md5.update(chunk)
+                        written += len(chunk)
+                        if max_bytes and written > max_bytes:
+                            raise ValueError("file too large")
+            finally:
+                if hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
 
             temp_path.replace(upload_path)
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
-            if hasattr(upload.stream, "close"):
-                try:
-                    upload.stream.close()
-                except OSError:
-                    pass
         except ValueError:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
-            if hasattr(upload.stream, "close"):
-                try:
-                    upload.stream.close()
-                except OSError:
-                    pass
             return _s3_error_response(
                 "EntityTooLarge",
                 "The uploaded file exceeds the allowed size.",
@@ -2127,18 +2227,15 @@ def s3_multipart_upload(bucket: str):
             )
         except Exception as error:
             lifecycle_logger.exception(
-                "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+                "s3_upload_failed reason=write_error bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
-            if hasattr(upload.stream, "close"):
-                try:
-                    upload.stream.close()
-                except OSError:
-                    pass
             return _s3_error_response(
                 "InternalError",
                 "Failed to store uploaded file.",
@@ -2158,7 +2255,9 @@ def s3_multipart_upload(bucket: str):
             upload_path.unlink(missing_ok=True)
             prune_empty_upload_dirs(upload_path.parent)
             lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+                "s3_upload_retention_invalid bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             return _s3_error_response(
                 "InvalidRequest",
@@ -2178,7 +2277,9 @@ def s3_multipart_upload(bucket: str):
             )
         except Exception:
             lifecycle_logger.exception(
-                "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+                "s3_upload_failed reason=registration_error bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
@@ -2200,7 +2301,7 @@ def s3_multipart_upload(bucket: str):
             lifecycle_logger.error(
                 "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
                 bucket,
-                key,
+                sanitize_log_value(key),
                 file_id,
             )
             return _s3_error_response(
@@ -2225,7 +2326,7 @@ def s3_multipart_upload(bucket: str):
         "file_uploaded_s3_post file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
         file_id,
         bucket,
-        key,
+        sanitize_log_value(key),
         size,
         retention_hours,
     )
@@ -2278,37 +2379,34 @@ def s3_put_object(bucket: str, key: str):
 
         written = 0
         try:
-            with temp_path.open("wb") as destination:
-                while True:
-                    chunk = stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    destination.write(chunk)
-                    hash_md5.update(chunk)
-                    written += len(chunk)
-                    if max_bytes and written > max_bytes:
-                        raise ValueError("file too large")
+            try:
+                with temp_path.open("wb") as destination:
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        hash_md5.update(chunk)
+                        written += len(chunk)
+                        if max_bytes and written > max_bytes:
+                            raise ValueError("file too large")
+            finally:
+                if hasattr(stream, "close"):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
             temp_path.replace(upload_path)
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
-            if hasattr(stream, "close"):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
         except ValueError:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
-            if hasattr(stream, "close"):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
             return _s3_error_response(
                 "EntityTooLarge",
                 "The uploaded file exceeds the allowed size.",
@@ -2318,18 +2416,15 @@ def s3_put_object(bucket: str, key: str):
             )
         except Exception:
             lifecycle_logger.exception(
-                "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+                "s3_upload_failed reason=write_error bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
-            if hasattr(stream, "close"):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
             return _s3_error_response(
                 "InternalError",
                 "Failed to store uploaded file.",
@@ -2348,7 +2443,9 @@ def s3_put_object(bucket: str, key: str):
             upload_path.unlink(missing_ok=True)
             prune_empty_upload_dirs(upload_path.parent)
             lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+                "s3_upload_retention_invalid bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             return _s3_error_response(
                 "InvalidRequest",
@@ -2366,6 +2463,15 @@ def s3_put_object(bucket: str, key: str):
         filename = secure_filename(original_name) or stored_filename
         content_type = request.headers.get("Content-Type")
 
+        if not validate_upload_mimetype(filename, content_type):
+            lifecycle_logger.warning(
+                "s3_upload_suspicious_mimetype bucket=%s key=%s filename=%s declared=%s",
+                bucket,
+                sanitize_log_value(key),
+                sanitize_log_value(filename),
+                content_type,
+            )
+
         try:
             file_id = register_file(
                 original_name=filename,
@@ -2377,7 +2483,9 @@ def s3_put_object(bucket: str, key: str):
             )
         except Exception:
             lifecycle_logger.exception(
-                "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+                "s3_upload_failed reason=registration_error bucket=%s key=%s",
+                bucket,
+                sanitize_log_value(key),
             )
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
@@ -2399,7 +2507,7 @@ def s3_put_object(bucket: str, key: str):
             lifecycle_logger.error(
                 "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
                 bucket,
-                key,
+                sanitize_log_value(key),
                 file_id,
             )
             return _s3_error_response(
@@ -2424,7 +2532,7 @@ def s3_put_object(bucket: str, key: str):
             "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
             file_id,
             bucket,
-            key,
+            sanitize_log_value(key),
             size,
             retention_hours,
         )

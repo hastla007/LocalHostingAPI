@@ -885,6 +885,19 @@ input[type="number"] {
   font-size: 1rem;
 }
 
+@media (max-width: 640px) {
+  .file-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .file-table th,
+  .file-table td {
+    white-space: nowrap;
+  }
+}
+
 @media (min-width: 640px) {
   .form-row {
     flex-direction: row;
