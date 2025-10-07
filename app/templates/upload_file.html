@@ -11,7 +11,7 @@
         aria-label="Select or drop a file to upload"
         aria-describedby="drop-zone-instructions drop-zone-filename"
       >
-        <input id="file-input" type="file" name="file" multiple required class="visually-hidden" />
+        <input id="file-input" type="file" name="file" multiple class="visually-hidden" />
         <div class="drop-zone-body">
           <span class="drop-zone-icon" aria-hidden="true">📁</span>
           <button type="button" class="button secondary drop-zone-trigger" id="file-select-button">
@@ -64,6 +64,8 @@
       if (!form) {
         return;
       }
+      form.setAttribute('novalidate', 'novalidate');
+
       const statusEl = document.getElementById('upload-status');
       const progressContainer = document.getElementById('upload-progress');
       const progressBar = document.getElementById('upload-progress-bar');
