@@ -1,0 +1,425 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card upload-card">
+    <h2>Upload a File</h2>
+    {% if api_auth_enabled and not api_ui_key %}
+      <p class="form-help warning">
+        API authentication is enabled but no dashboard API key has been assigned. Set a key in the settings page to upload from
+        the browser.
+      </p>
+    {% elif api_auth_enabled and api_ui_key and not api_ui_key.has_plaintext %}
+      <p class="form-help warning">
+        The dashboard API key was created before secure storage was enabled. Generate a new key or reassign the dashboard key to
+        restore browser uploads.
+      </p>
+    {% endif %}
+    <form
+      id="upload-form"
+      class="upload-form"
+      method="post"
+      action="{{ url_for('fileupload') }}"
+      enctype="multipart/form-data"
+      data-api-auth-enabled="{{ 'true' if api_auth_enabled else 'false' }}"
+      data-api-key="{{ api_ui_key.key if api_ui_key and api_ui_key.has_plaintext else '' }}"
+    >
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <div
+        id="drop-zone"
+        class="drop-zone"
+        tabindex="0"
+        role="button"
+        aria-label="Select or drop a file to upload"
+        aria-describedby="drop-zone-instructions drop-zone-filename"
+      >
+        <input id="file-input" type="file" name="file" multiple class="visually-hidden" />
+        <div class="drop-zone-body">
+          <span class="drop-zone-icon" aria-hidden="true">📁</span>
+          <button type="button" class="button secondary drop-zone-trigger" id="file-select-button">
+            Select File(s)
+          </button>
+          <p id="drop-zone-instructions" class="drop-zone-text">…or drag and drop one or more files anywhere in this area.</p>
+          <p id="drop-zone-filename" class="drop-zone-file" aria-live="polite"></p>
+        </div>
+      </div>
+      <div class="form-row form-row-actions">
+        <label class="form-control">
+          <span>Retention (hours)</span>
+          <input
+            type="number"
+            name="retention_hours"
+            step="0.1"
+            min="{{ config.retention_min_hours }}"
+            max="{{ config.retention_max_hours }}"
+            value="{{ config.retention_hours }}"
+            required
+          />
+          <small>Allowed: {{ config.retention_min_hours|round(2) }}&ndash;{{ config.retention_max_hours|round(2) }} hours</small>
+        </label>
+        <button
+          type="submit"
+          class="button primary"
+          title="Upload file"
+          aria-label="Upload file"
+        >
+          <span class="icon" aria-hidden="true">⬆️</span>
+          <span class="label">Upload</span>
+        </button>
+      </div>
+    </form>
+    <div id="upload-progress" class="progress hidden" aria-hidden="true">
+      <div id="upload-progress-bar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+    </div>
+    <div id="upload-status" class="status-message" role="status" aria-live="polite"></div>
+    <p class="help-text">
+      Files will remain available for at least {{ config.retention_min_hours|round(2) }} hours and at most
+      {{ config.retention_max_hours|round(2) }} hours. The default for new uploads is {{ config.retention_hours|round(2) }} hours.
+    </p>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const form = document.getElementById('upload-form');
+      if (!form) {
+        return;
+      }
+      form.setAttribute('novalidate', 'novalidate');
+
+      const apiAuthEnabled = form.dataset.apiAuthEnabled === 'true';
+      const apiKey = form.dataset.apiKey || '';
+
+      const statusEl = document.getElementById('upload-status');
+      const progressContainer = document.getElementById('upload-progress');
+      const progressBar = document.getElementById('upload-progress-bar');
+      const submitButton = form.querySelector('button[type="submit"]');
+      const fileInput = document.getElementById('file-input');
+      const dropZone = document.getElementById('drop-zone');
+      const dropZoneFileName = document.getElementById('drop-zone-filename');
+      const fileSelectButton = document.getElementById('file-select-button');
+      const retentionInput = form.querySelector('input[name="retention_hours"]');
+      const uploadQueue = [];
+      let isUploading = false;
+      let completedCount = 0;
+
+      const resetProgress = () => {
+        progressBar.style.width = '0%';
+        progressBar.removeAttribute('aria-valuenow');
+        progressContainer.classList.add('hidden');
+      };
+
+      const showStatus = (message, type = 'info', links = [], append = false) => {
+        if (!append) {
+          statusEl.textContent = '';
+        } else if (statusEl.textContent) {
+          statusEl.append(document.createElement('br'));
+        }
+        statusEl.className = `status-message ${type}`;
+        if (!message) {
+          return;
+        }
+        const span = document.createElement('span');
+        span.textContent = message;
+        statusEl.append(span);
+        const normalizedLinks = Array.isArray(links) ? links : links ? [links] : [];
+        normalizedLinks.forEach((link, index) => {
+          if (!link || !link.href || !link.text) {
+            return;
+          }
+          const linkEl = document.createElement('a');
+          linkEl.href = link.href;
+          linkEl.textContent = link.text;
+          linkEl.target = '_blank';
+          linkEl.rel = 'noopener noreferrer';
+          statusEl.append(index === 0 ? ' ' : ' | ');
+          statusEl.append(linkEl);
+        });
+      };
+
+      const updateDropZoneState = (text = '') => {
+        if (!dropZone || !dropZoneFileName) {
+          return;
+        }
+        dropZoneFileName.textContent = text;
+        if (text) {
+          dropZone.classList.add('has-file');
+        } else {
+          dropZone.classList.remove('has-file');
+        }
+      };
+
+      const describeQueue = () => {
+        if (!uploadQueue.length) {
+          updateDropZoneState('');
+          return;
+        }
+        if (uploadQueue.length === 1) {
+          updateDropZoneState(`Queued: ${uploadQueue[0].name}`);
+        } else {
+          updateDropZoneState(`${uploadQueue.length} files queued for upload.`);
+        }
+      };
+
+      const processQueue = () => {
+        if (!uploadQueue.length) {
+          isUploading = false;
+          if (completedCount > 0) {
+            showStatus(`All uploads completed. Uploaded ${completedCount} file(s).`, 'success', [], true);
+          }
+          completedCount = 0;
+          resetProgress();
+          updateDropZoneState('');
+          return;
+        }
+
+        const activeFile = uploadQueue.shift();
+        if (!activeFile) {
+          processQueue();
+          return;
+        }
+
+        isUploading = true;
+        updateDropZoneState(`Uploading: ${activeFile.name}`);
+
+        const formData = new FormData();
+        if (retentionInput && retentionInput.value) {
+          formData.append('retention_hours', retentionInput.value);
+        }
+        formData.append('file', activeFile, activeFile.name);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action, true);
+
+        if (apiAuthEnabled) {
+          if (!apiKey) {
+            showStatus(
+              'API authentication is enabled but no dashboard API key is configured. Update the settings page to assign a key.',
+              'error'
+            );
+            uploadQueue.unshift(activeFile);
+            isUploading = false;
+            describeQueue();
+            return;
+          }
+          xhr.setRequestHeader('X-API-Key', apiKey);
+        }
+
+        xhr.upload.addEventListener('loadstart', () => {
+          if (submitButton) {
+            submitButton.disabled = true;
+          }
+          if (retentionInput) {
+            retentionInput.setAttribute('aria-busy', 'true');
+          }
+          progressContainer.classList.remove('hidden');
+          progressBar.style.width = '0%';
+          progressBar.setAttribute('aria-valuenow', '0');
+          showStatus(`Starting upload: ${activeFile.name}`, 'info');
+        });
+
+        xhr.upload.addEventListener('progress', (event) => {
+          if (!event.lengthComputable) {
+            return;
+          }
+          const percent = Math.round((event.loaded / event.total) * 100);
+          progressBar.style.width = `${percent}%`;
+          progressBar.setAttribute('aria-valuenow', String(percent));
+          showStatus(`Uploading ${activeFile.name}… ${percent}%`, 'info');
+        });
+
+        xhr.addEventListener('error', () => {
+          if (submitButton) {
+            submitButton.disabled = false;
+          }
+          if (retentionInput) {
+            retentionInput.removeAttribute('aria-busy');
+          }
+          showStatus(`Network error during upload of ${activeFile.name}.`, 'error', [], true);
+          resetProgress();
+          isUploading = false;
+        });
+
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== XMLHttpRequest.DONE) {
+            return;
+          }
+
+          if (submitButton) {
+            submitButton.disabled = false;
+          }
+          if (retentionInput) {
+            retentionInput.removeAttribute('aria-busy');
+          }
+
+          let response;
+          try {
+            response = JSON.parse(xhr.responseText || '{}');
+          } catch (error) {
+            response = {};
+          }
+
+          if (xhr.status >= 200 && xhr.status < 300) {
+            completedCount += 1;
+            const filesPayload = Array.isArray(response.files) ? response.files : null;
+            const match = filesPayload
+              ? filesPayload.find((entry) => entry && entry.filename === activeFile.name) || filesPayload[0]
+              : response;
+            const filename = (match && match.filename) || activeFile.name || 'File';
+            const retention = match && match.retention_hours != null
+              ? `Retained for ${match.retention_hours} hours.`
+              : '';
+            const links = [];
+            if (match && match.download_url) {
+              links.push({ href: match.download_url, text: 'Download' });
+            }
+            if (match && match.direct_download_url) {
+              links.push({ href: match.direct_download_url, text: 'Direct Link' });
+            }
+            if (match && match.raw_download_url) {
+              links.push({ href: match.raw_download_url, text: 'Raw URL' });
+            }
+            const message = retention
+              ? `Upload complete: ${filename}. ${retention}`
+              : `Upload complete: ${filename}.`;
+            const remaining = uploadQueue.length;
+            const suffix = remaining ? ` ${remaining} file(s) remaining in queue.` : '';
+            showStatus(`${message}${suffix}`, 'success', links, true);
+            progressBar.style.width = '100%';
+            progressBar.setAttribute('aria-valuenow', '100');
+            if (remaining) {
+              describeQueue();
+            }
+          } else {
+            const errorMessage = (response && response.error) || (xhr.status === 401 ? 'API authentication required.' : 'Upload failed.');
+            showStatus(`${activeFile.name}: ${errorMessage}`, 'error', [], true);
+            resetProgress();
+          }
+
+          if (fileInput) {
+            fileInput.value = '';
+          }
+
+          isUploading = false;
+          processQueue();
+        };
+
+        xhr.send(formData);
+      };
+
+      const enqueueFiles = (fileList, { autoStart = true } = {}) => {
+        const files = Array.from(fileList || []).filter((file) => file && file.name);
+        if (!files.length) {
+          if (!uploadQueue.length && !isUploading) {
+            showStatus('Select at least one file to upload.', 'error');
+          }
+          return;
+        }
+
+        files.forEach((file) => uploadQueue.push(file));
+
+        if (!isUploading) {
+          describeQueue();
+        } else {
+          showStatus(`Queued ${files.length} additional file(s).`, 'info', [], true);
+        }
+
+        if (autoStart && !isUploading) {
+          processQueue();
+        } else if (!autoStart) {
+          showStatus(`Ready to upload ${files.length} file(s).`, 'info');
+        }
+      };
+
+      if (fileSelectButton && fileInput) {
+        fileSelectButton.addEventListener('click', () => {
+          fileInput.click();
+        });
+      }
+
+      if (fileInput) {
+        fileInput.addEventListener('change', (event) => {
+          enqueueFiles(event.target.files, { autoStart: false });
+          if (fileInput) {
+            fileInput.value = '';
+          }
+        });
+      }
+
+      if (form) {
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          if (!uploadQueue.length && !(fileInput && fileInput.files && fileInput.files.length)) {
+            showStatus('Select at least one file to upload.', 'error');
+            return;
+          }
+          if (fileInput && fileInput.files && fileInput.files.length) {
+            enqueueFiles(fileInput.files, { autoStart: false });
+          }
+          if (!isUploading) {
+            processQueue();
+          }
+        });
+      }
+
+      if (dropZone) {
+        const preventDefaults = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        };
+
+        ['dragenter', 'dragover'].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            preventDefaults(event);
+            dropZone.classList.add('dragover');
+          });
+        });
+
+        ['dragleave', 'dragend', 'drop'].forEach((eventName) => {
+          dropZone.addEventListener(eventName, (event) => {
+            if (eventName !== 'drop') {
+              preventDefaults(event);
+            }
+            if (
+              eventName === 'dragleave' &&
+              event.relatedTarget &&
+              dropZone.contains(event.relatedTarget)
+            ) {
+              return;
+            }
+            dropZone.classList.remove('dragover');
+          });
+        });
+
+        dropZone.addEventListener('drop', (event) => {
+          preventDefaults(event);
+          dropZone.classList.remove('dragover');
+          const files = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files : null;
+          if (!files || !files.length) {
+            return;
+          }
+          enqueueFiles(files, { autoStart: true });
+        });
+
+        dropZone.addEventListener('click', (event) => {
+          if (event.target.closest('button')) {
+            return;
+          }
+          if (fileInput) {
+            fileInput.click();
+          }
+        });
+
+        dropZone.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            if (fileInput) {
+              fileInput.click();
+            }
+          }
+        });
+      }
+
+      updateDropZoneState('');
+    });
+  </script>
+{% endblock %}
