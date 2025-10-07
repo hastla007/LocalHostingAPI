@@ -506,6 +506,47 @@ def cleanup_expired_files() -> int:
     return removed
 
 
+def cleanup_orphaned_files() -> int:
+    """Remove files on disk that have no corresponding database record."""
+
+    ensure_directories()
+    removed = 0
+
+    with get_db() as conn:
+        cursor = conn.execute("SELECT stored_name FROM files")
+        valid_names = {row["stored_name"] for row in cursor.fetchall()}
+
+    for shard_dir in UPLOADS_DIR.iterdir():
+        if not shard_dir.is_dir():
+            continue
+
+        for file_path in shard_dir.iterdir():
+            if not file_path.is_file():
+                continue
+
+            stored_name = file_path.name
+            if stored_name.endswith(".tmp"):
+                continue
+
+            if stored_name not in valid_names:
+                try:
+                    file_path.unlink()
+                    removed += 1
+                    logger.info("orphan_file_removed path=%s", file_path)
+                except OSError as error:
+                    logger.warning(
+                        "orphan_cleanup_failed path=%s error=%s",
+                        file_path,
+                        error,
+                    )
+
+        prune_empty_upload_dirs(shard_dir)
+
+    if removed:
+        logger.info("orphan_cleanup_completed removed=%d", removed)
+    return removed
+
+
 def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
     for row in records:
         remaining_seconds = max(row["expires_at"] - time.time(), 0)

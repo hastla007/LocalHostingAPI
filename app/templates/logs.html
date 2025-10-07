@@ -92,7 +92,12 @@
         }
         activeInterval = null;
         autoButtons.forEach((button) => button.classList.remove('active'));
-        autoStatus.textContent = 'Auto-refresh: OFF';
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = 'Auto-refresh: OFF';
+        }
       };
 
       const setAuto = (intervalSeconds, button) => {
@@ -103,7 +108,12 @@
         clearAuto();
         activeInterval = intervalSeconds;
         button.classList.add('active');
-        autoStatus.textContent = `Auto-refresh: every ${intervalSeconds}s`;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = `Auto-refresh: every ${intervalSeconds}s`;
+        }
         autoTimer = window.setInterval(fetchLogs, intervalSeconds * 1000);
       };
 
@@ -151,15 +161,86 @@
       const fetchLogs = async () => {
         const params = new URLSearchParams({ source: sourceSelect.value });
         try {
-          const response = await fetch(`${endpoint}?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
-          if (!response.ok) {
-            throw new Error(`Failed to load logs: ${response.status}`);
+          const fetchOptions = {
+            headers: { Accept: 'application/json' },
+          };
+
+          if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+            fetchOptions.signal = AbortSignal.timeout(10000);
           }
+
+          const response = await fetch(`${endpoint}?${params.toString()}`, fetchOptions);
+
+          if (!response.ok) {
+            let errorMsg = `HTTP ${response.status}`;
+            if (response.status === 401) {
+              errorMsg = 'Authentication required';
+            } else if (response.status === 403) {
+              errorMsg = 'Access denied';
+            } else if (response.status === 404) {
+              errorMsg = 'Log source not found';
+            } else if (response.status >= 500) {
+              errorMsg = 'Server error';
+            }
+            throw new Error(errorMsg);
+          }
+
           const payload = await response.json();
           renderPayload(payload);
+
+          if (autoStatus) {
+            autoStatus.classList.remove('error');
+            autoStatus.style.color = '';
+            autoStatus.style.fontWeight = '';
+            autoStatus.textContent = activeInterval
+              ? `Auto-refresh: every ${activeInterval}s`
+              : 'Auto-refresh: OFF';
+          }
+
+          const viewer = document.getElementById('log-output');
+          if (viewer) {
+            const placeholder = viewer.querySelector('.log-empty');
+            if (placeholder) {
+              placeholder.remove();
+            }
+          }
         } catch (error) {
-          console.error(error);
-          autoStatus.textContent = 'Auto-refresh: error fetching logs';
+          console.error('Log fetch error:', error);
+
+          let userMessage = 'Error loading logs';
+          if (error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+            userMessage = 'Request timed out - logs may be too large';
+          } else if (
+            error &&
+            typeof error.message === 'string' &&
+            (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))
+          ) {
+            userMessage = 'Network error - check connection';
+          } else if (error && typeof error.message === 'string' && error.message.trim()) {
+            userMessage = `Error: ${error.message}`;
+          }
+
+          clearAuto();
+
+          if (autoStatus) {
+            autoStatus.textContent = userMessage;
+            autoStatus.classList.add('error');
+            autoStatus.style.color = '#dc2626';
+            autoStatus.style.fontWeight = '600';
+          }
+
+          const viewer = document.getElementById('log-output');
+          if (viewer) {
+            viewer.innerHTML = `
+              <div class="log-empty" style="color: #fca5a5;">
+                ⚠️ ${userMessage}
+                <br><br>
+                <button type="button" class="button secondary" onclick="fetchLogs()">
+                  Retry
+                </button>
+              </div>
+            `;
+          }
         }
       };
 
@@ -172,6 +253,8 @@
       autoButtons.forEach((button) => {
         button.addEventListener('click', () => setAuto(Number(button.dataset.autoInterval), button));
       });
+
+      window.fetchLogs = fetchLogs;
     })();
   </script>
 {% endblock %}

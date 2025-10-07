@@ -137,6 +137,7 @@ from .storage import (
     UPLOADS_DIR,
     RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
+    cleanup_orphaned_files,
     delete_file,
     ensure_directories,
     get_db,
@@ -154,6 +155,13 @@ from .storage import (
 
 from threading import Semaphore
 
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
+logging.basicConfig(
+    level=numeric_level,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 RESERVED_ROUTE_ENDPOINTS = {
     "hosting": "hosting",
     "upload-a-file": "upload_file_page",
@@ -161,13 +169,6 @@ RESERVED_ROUTE_ENDPOINTS = {
     "api-docs": "api_docs",
     "settings": "settings",
 }
-
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
-logging.basicConfig(
-    level=numeric_level,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 
 
 def _load_secret_key() -> str:
@@ -813,14 +814,32 @@ if BackgroundScheduler is not None:
         name="Clean up expired files",
         replace_existing=True,
     )
-else:  # pragma: no cover - exercised in environments without APScheduler
-    scheduler = _FallbackCleanupScheduler(
-        cleanup_expired_files,
-        minutes=max(1, cleanup_interval),
+    scheduler.add_job(
+        func=cleanup_orphaned_files,
+        trigger="interval",
+        hours=1,
+        id="cleanup_orphaned_files",
+        name="Clean up orphaned files",
+        replace_existing=True,
     )
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown(wait=False))
+else:  # pragma: no cover - exercised in environments without APScheduler
+    _fallback_schedulers = [
+        _FallbackCleanupScheduler(
+            cleanup_expired_files,
+            minutes=max(1, cleanup_interval),
+        ),
+        _FallbackCleanupScheduler(
+            cleanup_orphaned_files,
+            minutes=60,
+        ),
+    ]
 
-scheduler.start()
-atexit.register(lambda: scheduler.shutdown(wait=False))
+    for _scheduler in _fallback_schedulers:
+        _scheduler.start()
+
+    atexit.register(lambda: [sched.shutdown(wait=False) for sched in _fallback_schedulers])
 
 # Run a single cleanup on startup to enforce retention before serving traffic.
 cleanup_expired_files()
@@ -1098,6 +1117,7 @@ def upload_file_page():
         config=config,
         api_auth_enabled=bool(config.get("api_auth_enabled")),
         api_ui_key=get_ui_api_key(config),
+        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024),
     )
 
 
@@ -1635,7 +1655,7 @@ def download(file_id: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
+        delete_file(file_id)
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
@@ -1677,7 +1697,7 @@ def direct_download(file_id: str, filename: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
+        delete_file(file_id)
         abort(404)
     lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     try:
@@ -1976,7 +1996,7 @@ def box_download_file(file_id: str):
 
     if record["expires_at"] < time.time():
         lifecycle_logger.info("box_download_blocked_expired file_id=%s", file_id)
-        cleanup_expired_files()
+        delete_file(file_id)
         return _box_error("expired", "The requested file has expired.", status=404)
 
     lifecycle_logger.info("file_downloaded_box file_id=%s", file_id)
@@ -2007,7 +2027,7 @@ def box_file_request(file_id: str):
 
     if record["expires_at"] < time.time():
         lifecycle_logger.info("box_file_request_expired file_id=%s", file_id)
-        cleanup_expired_files()
+        delete_file(file_id)
         return _box_error("expired", "The requested file has expired.", status=404)
 
     download_url = url_for("box_download_file", file_id=file_id, _external=True)
@@ -2046,20 +2066,18 @@ def serve_raw_file(direct_path: str):
     first_segment = normalized.split("/", 1)[0]
     first_segment_lower = first_segment.lower()
 
-    if "/" not in normalized and first_segment_lower in RESERVED_ROUTE_ENDPOINTS:
-        endpoint = RESERVED_ROUTE_ENDPOINTS[first_segment_lower]
-        canonical = url_for(endpoint)
-        if request.path != canonical:
-            return redirect(canonical, code=308)
-        abort(404)
+    if "/" not in normalized:
+        endpoint = RESERVED_ROUTE_ENDPOINTS.get(first_segment_lower)
+        if endpoint:
+            canonical = url_for(endpoint)
+            if request.path != canonical:
+                return redirect(canonical, code=308)
 
     if first_segment_lower in RESERVED_DIRECT_PATHS:
         abort(404)
 
     record = get_file_by_direct_path(normalized)
     if not record:
-        if first_segment_lower in RESERVED_ROUTE_ENDPOINTS:
-            abort(404)
         lifecycle_logger.warning(
             "file_raw_missing direct_path=%s", sanitize_log_value(normalized)
         )
@@ -2078,7 +2096,7 @@ def serve_raw_file(direct_path: str):
             record["id"],
             sanitize_log_value(normalized),
         )
-        cleanup_expired_files()
+        delete_file(record["id"])
         abort(404)
 
     lifecycle_logger.info(

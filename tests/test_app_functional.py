@@ -123,6 +123,32 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
         self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
 
+    def test_failed_upload_cleanup(self):
+        uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
+        files_before = [path for path in uploads_dir.rglob("*") if path.is_file()]
+        count_before = len(files_before)
+
+        response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"x" * 1024), "too_long.txt"),
+                "retention_hours": "99999",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+
+        files_after = [path for path in uploads_dir.rglob("*") if path.is_file()]
+        count_after = len(files_after)
+        self.assertEqual(count_before, count_after)
+
+        empty_dirs = [
+            directory
+            for directory in uploads_dir.rglob("*")
+            if directory.is_dir() and not any(directory.iterdir())
+        ]
+        self.assertEqual(len(empty_dirs), 0)
+
     def test_multi_file_upload_support(self):
         response = self.client.post(
             "/fileupload",

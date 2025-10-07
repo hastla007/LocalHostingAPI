@@ -408,6 +408,15 @@ main {
   padding-left: 0.5rem;
 }
 
+.auto-status.error {
+  color: #dc2626;
+  font-weight: 600;
+  background: #fef2f2;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #fecaca;
+}
+
 .log-meta {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -730,6 +739,12 @@ main {
 .status-message.error {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.status-message.warning {
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
 }
 
 .status-message.info {
