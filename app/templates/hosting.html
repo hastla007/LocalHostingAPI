@@ -22,7 +22,10 @@
           <small>Allowed: {{ config.retention_min_hours|round(2) }}&ndash;{{ config.retention_max_hours|round(2) }} hours</small>
         </label>
       </div>
-      <button type="submit" class="button primary">Upload</button>
+      <button type="submit" class="button primary">
+        <span class="icon" aria-hidden="true">⬆️</span>
+        <span class="label">Upload</span>
+      </button>
     </form>
     <div id="upload-progress" class="progress hidden" aria-hidden="true">
       <div id="upload-progress-bar" class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
@@ -56,23 +59,35 @@
               <td>{{ file.expires_at|human_datetime }}</td>
               <td class="time-remaining">{{ file.remaining_seconds|human_timedelta }}</td>
               <td>
-                <a href="{{ file.download_url }}" class="button">Download</a>
+                <a href="{{ file.download_url }}" class="button">
+                  <span class="icon" aria-hidden="true">⬇️</span>
+                  <span class="label">Download</span>
+                </a>
                 <a
                   href="{{ file.direct_download_url }}"
                   class="button secondary"
                   target="_blank"
                   rel="noopener noreferrer"
-                >Direct Link</a>
+                >
+                  <span class="icon" aria-hidden="true">🔗</span>
+                  <span class="label">Direct Link</span>
+                </a>
                 {% if file.raw_download_url %}
                   <a
                     href="{{ file.raw_download_url }}"
                     class="button secondary"
                     target="_blank"
                     rel="noopener noreferrer"
-                  >Raw URL</a>
+                  >
+                    <span class="icon" aria-hidden="true">🌐</span>
+                    <span class="label">Raw URL</span>
+                  </a>
                 {% endif %}
                 <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
-                  <button type="submit" class="button danger">Delete</button>
+                  <button type="submit" class="button danger">
+                    <span class="icon" aria-hidden="true">🗑️</span>
+                    <span class="label">Delete</span>
+                  </button>
                 </form>
               </td>
             </tr>

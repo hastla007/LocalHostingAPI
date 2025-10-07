@@ -74,7 +74,9 @@ main {
 }
 
 .button {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   padding: 0.5rem 0.9rem;
   border-radius: 6px;
   text-decoration: none;
@@ -103,6 +105,18 @@ main {
 
 .button.primary:hover {
   background: #15803d;
+}
+
+.button .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05em;
+  line-height: 1;
+}
+
+.button .label {
+  line-height: 1;
 }
 
 .inline-form {
