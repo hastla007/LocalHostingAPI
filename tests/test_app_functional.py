@@ -170,6 +170,41 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Upload a File", response.data)
 
+    def test_index_redirects_to_hosting(self):
+        response = self.client.get("/", follow_redirects=False)
+        self.assertIn(response.status_code, {301, 302, 307, 308})
+        self.assertEqual(response.headers.get("Location"), "/hosting")
+
+    def test_delete_route_removes_file(self):
+        upload_response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"delete me"), "delete.txt"),
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload_response.status_code, 201)
+        file_id = upload_response.get_json()["id"]
+
+        delete_response = self.client.post(
+            f"/hosting/delete/{file_id}",
+            follow_redirects=True,
+        )
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertIn(b"File deleted successfully.", delete_response.data)
+
+        uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
+        self.assertFalse(any(uploads_dir.iterdir()))
+
+    def test_delete_route_missing_file_shows_error(self):
+        response = self.client.post(
+            "/hosting/delete/does-not-exist",
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"File not found.", response.data)
+
     def test_navigation_includes_logs_link(self):
         response = self.client.get("/hosting")
         self.assertEqual(response.status_code, 200)
@@ -196,6 +231,21 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         response = self.client.get("/Logs", follow_redirects=False)
         self.assertEqual(response.status_code, 308)
         self.assertEqual(response.headers.get("Location"), "/logs")
+
+    def test_settings_rejects_invalid_values(self):
+        response = self.client.post(
+            "/settings",
+            data={
+                "retention_min_hours": "-1",
+                "retention_max_hours": "48",
+                "retention_hours": "12",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Minimum retention cannot be negative.", response.data)
+
+        config = self.storage.load_config()
+        self.assertEqual(config["retention_min_hours"], 0.0)
 
     def test_reserved_direct_paths_are_regenerated(self):
         with self.storage.get_db() as conn:
