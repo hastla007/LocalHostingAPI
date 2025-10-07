@@ -6,6 +6,7 @@ Local Hosting API is a lightweight self-hosted file upload service designed for 
 
 - **Upload API** – Send single or multiple files to `/fileupload` using multipart form data.
 - **S3-compatible uploads** – Target `/s3/<bucket>` (POST) or `/s3/<bucket>/<key>` (PUT) using clients that speak the Amazon S3 object API.
+- **Box-compatible uploads** – Use `/2.0/files/content`, `/2.0/files/<id>/content`, and `/2.0/file_requests/<id>` with Box SDKs or integrations that expect the Box Files APIs.
 - **Web dashboard** – Browse uploads at `/hosting`, download files, remove them manually, and track expiration details. Use `/upload-a-file` for the drag-and-drop uploader with retention controls.
 - **Shareable download links** – Retrieve classic ID-based URLs, direct links that embed the original filename, or raw filename-only URLs for inline streaming.
 - **API documentation** – Review example requests and responses at `/api-docs`.
@@ -34,6 +35,16 @@ The service will be available at <http://localhost:8000>.
 Navigate to <http://localhost:8000/api-docs> for detailed examples covering file uploads and downloads, including ready-to-use
 `curl` commands, sample responses, Amazon S3-compatible object uploads, and notes about the ID-based, direct, and raw filename
 download URLs returned by the API.
+
+### Box-Compatible Endpoints
+
+Integrations built against Box.com&rsquo;s files API can point at Local Hosting API using the following routes:
+
+- `POST /2.0/files/content` &mdash; Accepts multipart uploads with an optional `attributes` JSON part and returns Box-style metadata (including SHA-1 hashes) for each stored file.
+- `GET /2.0/files/<id>/content` &mdash; Streams the stored file back using the original filename and reported content type.
+- `GET /2.0/file_requests/<id>` &mdash; Provides request metadata plus the canonical upload and download URLs for the stored file.
+
+Uploads handled through these endpoints respect the configured retention bounds, emit lifecycle logs, and appear in the `/hosting` dashboard alongside native and S3-compatible uploads.
 
 ### Configuring Retention
 

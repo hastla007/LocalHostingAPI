@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -382,6 +383,41 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         if s3_put_record["direct_path"]:
             self.assertIn(f"href=\"/{s3_put_record['direct_path']}\"", html)
+
+    def test_box_api_upload_download_and_file_request(self):
+        content = b"box api data"
+        response = self.client.post(
+            "/2.0/files/content",
+            data={
+                "attributes": json.dumps({"name": "box.txt"}),
+                "file": (io.BytesIO(content), "ignored-name.txt"),
+            },
+            headers={"X-Localhosting-Retention-Hours": "1"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["total_count"], 1)
+        entry = payload["entries"][0]
+        self.assertEqual(entry["name"], "box.txt")
+        self.assertIn("sha1", entry)
+
+        download_response = self.client.get(f"/2.0/files/{entry['id']}/content")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.data, content)
+        download_response.close()
+
+        request_response = self.client.get(f"/2.0/file_requests/{entry['id']}")
+        self.assertEqual(request_response.status_code, 200)
+        request_payload = request_response.get_json()
+        self.assertIsNotNone(request_payload)
+        self.assertEqual(request_payload["id"], entry["id"])
+        self.assertEqual(request_payload["title"], "box.txt")
+
+        hosting_page = self.client.get("/hosting")
+        self.assertEqual(hosting_page.status_code, 200)
+        self.assertIn(b"box.txt", hosting_page.data)
 
     def test_logs_supports_docker_source_when_configured(self):
         logs_dir = Path(os.environ["LOCALHOSTING_LOGS_DIR"])

@@ -124,6 +124,39 @@
   </section>
 
   <section class="card">
+    <h2>Box-Compatible Endpoints</h2>
+    <p>
+      To integrate with SDKs or automation that expect Box.com&rsquo;s file APIs, Local Hosting API exposes lightweight
+      compatibility routes that mirror the core upload and download behaviour.
+    </p>
+    <h3>Upload Content</h3>
+    <p><strong>Endpoint:</strong> <code>POST /2.0/files/content</code></p>
+    <p>
+      Send a multipart form-data request with a file field named <code>file</code>. Optional metadata can be supplied via
+      an <code>attributes</code> field containing JSON, matching the payload format the Box API expects. The response
+      returns an <code>entries</code> array with Box-style metadata including SHA-1 hashes and shareable download URLs.
+    </p>
+    <pre><code>curl -X POST \
+  -F "attributes={\"name\":\"report.pdf\"}" \
+  -F "file=@/path/to/report.pdf" \
+  {{ request.url_root.rstrip('/') }}/2.0/files/content</code></pre>
+    <h3>Download Content</h3>
+    <p><strong>Endpoint:</strong> <code>GET /2.0/files/&lt;id&gt;/content</code></p>
+    <p>
+      Streams the stored file back with the original filename and content type. The returned payload is the raw file
+      bytes, so you can pipe the response directly to disk.
+    </p>
+    <pre><code>curl -L -o report.pdf {{ request.url_root.rstrip('/') }}/2.0/files/&lt;id&gt;/content</code></pre>
+    <h3>File Request Metadata</h3>
+    <p><strong>Endpoint:</strong> <code>GET /2.0/file_requests/&lt;id&gt;</code></p>
+    <p>
+      Returns a JSON document describing the stored file with fields such as <code>title</code>, <code>status</code>,
+      <code>upload_url</code>, and <code>url</code> so Box automations can link directly to the compatible upload and
+      download routes.
+    </p>
+  </section>
+
+  <section class="card">
     <h2>Download a File</h2>
     <p><strong>Endpoint:</strong> <code>GET /download/&lt;id&gt;</code></p>
     <p>Use the <code>download_url</code> returned during upload or substitute the file ID:</p>

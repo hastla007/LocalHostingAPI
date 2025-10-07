@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import time
@@ -7,7 +8,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from secrets import compare_digest
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 
@@ -245,6 +246,24 @@ def resolve_retention(config: dict, *candidates: Optional[str]) -> float:
         )
 
     return retention
+
+
+def _box_error(
+    code: str,
+    message: str,
+    *,
+    status: int = 400,
+    context: Optional[Dict[str, str]] = None,
+) -> Response:
+    payload: Dict[str, object] = {
+        "type": "error",
+        "status": status,
+        "code": code,
+        "message": message,
+    }
+    if context:
+        payload["context_info"] = context
+    return make_response(jsonify(payload), status)
 
 
 def _s3_error_response(
@@ -639,6 +658,236 @@ def direct_download(file_id: str, filename: str):
         as_attachment=True,
         download_name=record["original_name"],
     )
+
+
+@app.route("/2.0/files/content", methods=["POST"])
+def box_upload_files():
+    config = load_config()
+    uploads = request.files.getlist("file")
+    if not uploads:
+        lifecycle_logger.warning("box_upload_failed reason=no_file_part")
+        return _box_error("no_file", "No file part found in the request.")
+
+    attributes_raw = request.form.get("attributes")
+    attributes: Dict[str, object] = {}
+    if attributes_raw:
+        try:
+            attributes = json.loads(attributes_raw)
+        except json.JSONDecodeError:
+            lifecycle_logger.warning("box_upload_failed reason=invalid_attributes")
+            return _box_error(
+                "invalid_attributes",
+                "The provided attributes payload could not be parsed as JSON.",
+            )
+
+    retention_candidates = (
+        request.headers.get("X-Localhosting-Retention-Hours"),
+        request.form.get("retention_hours"),
+        request.args.get("retention_hours"),
+        (
+            str(attributes.get("retention_hours"))
+            if isinstance(attributes, dict)
+            and attributes.get("retention_hours") is not None
+            else None
+        ),
+    )
+
+    try:
+        retention_hours = resolve_retention(config, *retention_candidates)
+    except RetentionValidationError as error:
+        allowed_range = error.allowed_range or [
+            config["retention_min_hours"],
+            config["retention_max_hours"],
+        ]
+        lifecycle_logger.warning(
+            "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
+            allowed_range[0],
+            allowed_range[1],
+        )
+        context = {
+            "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
+        }
+        return _box_error("retention_invalid", str(error), context=context)
+
+    entries = []
+    for upload in uploads:
+        if not upload or upload.filename == "":
+            continue
+
+        requested_name = None
+        if isinstance(attributes, dict):
+            requested_name = attributes.get("name")
+
+        original_name = requested_name or upload.filename or f"upload-{uuid.uuid4().hex}"
+        filename = secure_filename(original_name)
+        if not filename:
+            filename = (
+                secure_filename(upload.filename or "upload")
+                or f"upload-{uuid.uuid4().hex}"
+            )
+
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+
+        hash_sha1 = hashlib.sha1()
+        if hasattr(upload.stream, "seek"):
+            upload.stream.seek(0)
+        with upload_path.open("wb") as destination:
+            while True:
+                chunk = upload.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+                hash_sha1.update(chunk)
+
+        size = upload_path.stat().st_size
+        content_type = upload.content_type
+
+        file_id = register_file(
+            original_name=filename,
+            stored_name=stored_name,
+            content_type=content_type,
+            size=size,
+            retention_hours=retention_hours,
+            file_id=file_id,
+        )
+
+        record = get_file(file_id)
+        if not record:
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+            lifecycle_logger.warning("box_upload_failed reason=registration_missing")
+            continue
+
+        download_url = url_for("download", file_id=file_id, _external=True)
+        direct_download_url = url_for(
+            "direct_download", file_id=file_id, filename=record["original_name"], _external=True
+        )
+        raw_path_value = record["direct_path"] if record["direct_path"] else None
+        raw_download_url = (
+            url_for("serve_raw_file", direct_path=raw_path_value, _external=True)
+            if raw_path_value
+            else None
+        )
+
+        iso_timestamp = datetime.fromtimestamp(record["uploaded_at"]).isoformat()
+        entry = {
+            "type": "file",
+            "id": file_id,
+            "name": record["original_name"],
+            "size": size,
+            "sha1": hash_sha1.hexdigest(),
+            "etag": file_id,
+            "sequence_id": "0",
+            "created_at": iso_timestamp,
+            "modified_at": iso_timestamp,
+            "content_modified_at": iso_timestamp,
+            "file_version": {
+                "type": "file_version",
+                "id": f"{file_id}_v1",
+                "sha1": hash_sha1.hexdigest(),
+            },
+            "path_collection": {
+                "total_count": 1,
+                "entries": [
+                    {
+                        "type": "folder",
+                        "id": "0",
+                        "name": "Uploads",
+                    }
+                ],
+            },
+            "shared_link": {
+                "download_url": download_url,
+                "direct_download_url": direct_download_url,
+                "raw_download_url": raw_download_url,
+            },
+            "expires_at": record["expires_at"],
+            "expires_at_iso": datetime.fromtimestamp(record["expires_at"]).isoformat(),
+        }
+        entries.append(entry)
+        lifecycle_logger.info(
+            "file_uploaded_box file_id=%s filename=%s size=%d retention_hours=%.2f",
+            file_id,
+            record["original_name"],
+            size,
+            retention_hours,
+        )
+
+    if not entries:
+        return _box_error("no_valid_files", "No valid files were provided.")
+
+    response = jsonify({"entries": entries, "total_count": len(entries)})
+    response.status_code = 201
+    return response
+
+
+@app.route("/2.0/files/<file_id>/content", methods=["GET"])
+def box_download_file(file_id: str):
+    record = get_file(file_id)
+    if not record:
+        lifecycle_logger.warning("box_download_missing file_id=%s", file_id)
+        return _box_error("not_found", "File not found.", status=404)
+
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("box_download_blocked_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        return _box_error("expired", "The requested file has expired.", status=404)
+
+    file_path = get_storage_path(record["id"], record["stored_name"])
+    if not file_path.exists():
+        lifecycle_logger.warning(
+            "box_download_missing_path file_id=%s stored_name=%s",
+            file_id,
+            record["stored_name"],
+        )
+        return _box_error("not_found", "File content is unavailable.", status=404)
+
+    lifecycle_logger.info("file_downloaded_box file_id=%s", file_id)
+    mimetype = record["content_type"]
+    return send_file(
+        file_path,
+        as_attachment=True,
+        download_name=record["original_name"],
+        mimetype=mimetype or None,
+    )
+
+
+@app.route("/2.0/file_requests/<file_id>", methods=["GET"])
+def box_file_request(file_id: str):
+    record = get_file(file_id)
+    if not record:
+        lifecycle_logger.warning("box_file_request_missing file_id=%s", file_id)
+        return _box_error("not_found", "File request not found.", status=404)
+
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("box_file_request_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        return _box_error("expired", "The requested file has expired.", status=404)
+
+    download_url = url_for("box_download_file", file_id=file_id, _external=True)
+    upload_url = url_for("box_upload_files", _external=True)
+    response_payload = {
+        "type": "file_request",
+        "id": file_id,
+        "title": record["original_name"],
+        "description": "Local Hosting API generated file request.",
+        "status": "active",
+        "is_enabled": True,
+        "folder": {
+            "type": "folder",
+            "id": "0",
+            "name": "Uploads",
+        },
+        "url": download_url,
+        "upload_url": upload_url,
+        "created_at": datetime.fromtimestamp(record["uploaded_at"]).isoformat(),
+        "updated_at": datetime.fromtimestamp(record["uploaded_at"]).isoformat(),
+        "expires_at": datetime.fromtimestamp(record["expires_at"]).isoformat(),
+    }
+    lifecycle_logger.info("box_file_request_retrieved file_id=%s", file_id)
+    return jsonify(response_payload)
 
 
 @app.route("/<path:direct_path>")
