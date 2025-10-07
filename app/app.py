@@ -50,7 +50,10 @@ try:
 
             return _compat_urlencode(items, doseq=True)
 
-        _werkzeug_urls.url_encode = _url_encode_compat  # type: ignore[assignment]
+        setattr(_werkzeug_urls, "url_encode", _url_encode_compat)
+        export_list = getattr(_werkzeug_urls, "__all__", None)
+        if isinstance(export_list, list) and "url_encode" not in export_list:
+            export_list.append("url_encode")
 except Exception:  # pragma: no cover - defensive best-effort shim
     pass
 
