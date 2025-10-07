@@ -551,6 +551,74 @@ main {
   max-width: 320px;
 }
 
+.retention-system-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.settings-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+}
+
+.settings-column {
+  flex: 1 1 280px;
+}
+
+.system-settings h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.settings-table tr:last-child th,
+.settings-table tr:last-child td {
+  border-bottom: none;
+}
+
+.settings-table th {
+  width: 60%;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.settings-table td input[type="number"] {
+  width: 100%;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+@media (max-width: 768px) {
+  .settings-columns {
+    gap: 1.25rem;
+  }
+
+  .settings-table th {
+    width: 100%;
+  }
+}
+
 .auth-grid {
   max-width: 420px;
 }
