@@ -921,33 +921,63 @@ def fileupload():
         return jsonify(error.to_payload()), 400
 
     results = []
+    failures: List[Dict[str, str]] = []
     for upload, filename in valid_uploads:
+        upload_path = None
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-        upload.save(str(upload_path))
-        size = upload_path.stat().st_size
+        try:
+            upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+            upload.save(str(upload_path))
+            size = upload_path.stat().st_size
 
-        file_id = register_file(
-            original_name=filename,
-            stored_name=stored_name,
-            content_type=upload.content_type,
-            size=size,
-            retention_hours=retention_hours,
-            file_id=file_id,
-        )
+            file_id = register_file(
+                original_name=filename,
+                stored_name=stored_name,
+                content_type=upload.content_type,
+                size=size,
+                retention_hours=retention_hours,
+                file_id=file_id,
+            )
+        except Exception as error:
+            lifecycle_logger.exception(
+                "file_upload_failed file_id=%s filename=%s", file_id, filename
+            )
+            if upload_path and upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            failures.append(
+                {
+                    "filename": filename,
+                    "reason": "internal_error",
+                    "detail": str(error),
+                }
+            )
+            continue
 
         record = get_file(file_id)
-        if record:
-            expires_at = record["expires_at"]
-            uploaded_at = record["uploaded_at"]
-            raw_download_url = url_for(
-                "serve_raw_file", direct_path=record["direct_path"], _external=True
+        if not record:
+            lifecycle_logger.error(
+                "file_registration_failed file_id=%s filename=%s", file_id, filename
             )
-        else:
-            expires_at = time.time()
-            uploaded_at = expires_at
-            raw_download_url = ""
+            if upload_path and upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            failures.append(
+                {
+                    "filename": filename,
+                    "reason": "registration_failed",
+                }
+            )
+            continue
+
+        expires_at = record["expires_at"]
+        uploaded_at = record["uploaded_at"]
+        raw_download_url = (
+            url_for("serve_raw_file", direct_path=record["direct_path"], _external=True)
+            if record["direct_path"]
+            else ""
+        )
 
         download_url = url_for("download", file_id=file_id, _external=True)
         direct_download_url = url_for(
@@ -972,24 +1002,32 @@ def fileupload():
                 "expires_at_iso": datetime.fromtimestamp(expires_at).isoformat(),
                 "direct_download_url": direct_download_url,
                 "raw_download_url": raw_download_url,
-                "raw_download_path": record["direct_path"] if record else "",
+                "raw_download_path": record["direct_path"],
                 "message": "File uploaded successfully.",
             }
         )
 
-    if len(results) == 1:
+    if not results:
+        message = {
+            "message": "Failed to upload files.",
+            "errors": failures,
+        }
+        return jsonify(message), 500
+
+    if len(results) == 1 and not failures:
         return jsonify(results[0]), 201
 
-    return (
-        jsonify(
-            {
-                "message": f"Uploaded {len(results)} files successfully.",
-                "files": results,
-                "retention_hours": retention_hours,
-            }
-        ),
-        201,
-    )
+    response_payload: Dict[str, object] = {
+        "message": f"Uploaded {len(results)} files successfully.",
+        "files": results,
+        "retention_hours": retention_hours,
+    }
+    if failures:
+        response_payload["message"] = (
+            f"Uploaded {len(results)} files successfully; {len(failures)} failed."
+        )
+        response_payload["failed_files"] = failures
+    return jsonify(response_payload), 201
 
 
 @app.route("/download/<file_id>")
@@ -1125,32 +1163,53 @@ def box_upload_files():
         hash_sha1 = hashlib.sha1()
         if hasattr(upload.stream, "seek"):
             upload.stream.seek(0)
-        with upload_path.open("wb") as destination:
-            while True:
-                chunk = upload.stream.read(1024 * 1024)
-                if not chunk:
-                    break
-                destination.write(chunk)
-                hash_sha1.update(chunk)
 
-        size = upload_path.stat().st_size
-        content_type = upload.content_type
+        try:
+            with upload_path.open("wb") as destination:
+                while True:
+                    chunk = upload.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    hash_sha1.update(chunk)
 
-        file_id = register_file(
-            original_name=filename,
-            stored_name=stored_name,
-            content_type=content_type,
-            size=size,
-            retention_hours=retention_hours,
-            file_id=file_id,
-        )
+            size = upload_path.stat().st_size
+            content_type = upload.content_type
+
+            file_id = register_file(
+                original_name=filename,
+                stored_name=stored_name,
+                content_type=content_type,
+                size=size,
+                retention_hours=retention_hours,
+                file_id=file_id,
+            )
+        except Exception as error:
+            lifecycle_logger.exception(
+                "box_upload_failed reason=internal_error filename=%s", filename
+            )
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _box_error(
+                "internal_error",
+                "Failed to store uploaded file.",
+                status=500,
+            )
 
         record = get_file(file_id)
         if not record:
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.warning("box_upload_failed reason=registration_missing")
-            continue
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            lifecycle_logger.error(
+                "box_upload_failed reason=registration_missing file_id=%s", file_id
+            )
+            return _box_error(
+                "internal_error",
+                f"Failed to register file {original_name}",
+                status=500,
+            )
 
         download_url = url_for("download", file_id=file_id, _external=True)
         direct_download_url = url_for(
@@ -1290,6 +1349,9 @@ def serve_raw_file(direct_path: str):
     if not normalized:
         abort(404)
 
+    if ".." in normalized or normalized.startswith("/"):
+        abort(404)
+
     first_segment = normalized.split("/", 1)[0]
     first_segment_lower = first_segment.lower()
 
@@ -1371,15 +1433,30 @@ def s3_multipart_upload(bucket: str):
     upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
 
     hash_md5 = hashlib.md5()
-    if hasattr(upload.stream, "seek"):
-        upload.stream.seek(0)
-    with upload_path.open("wb") as destination:
-        while True:
-            chunk = upload.stream.read(1024 * 1024)
-            if not chunk:
-                break
-            destination.write(chunk)
-            hash_md5.update(chunk)
+    try:
+        if hasattr(upload.stream, "seek"):
+            upload.stream.seek(0)
+        with upload_path.open("wb") as destination:
+            while True:
+                chunk = upload.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+                hash_md5.update(chunk)
+    except Exception as error:
+        lifecycle_logger.exception(
+            "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+        )
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        return _s3_error_response(
+            "InternalError",
+            "Failed to store uploaded file.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
 
     try:
         retention_hours = resolve_retention(
@@ -1402,17 +1479,50 @@ def s3_multipart_upload(bucket: str):
         )
 
     size = upload_path.stat().st_size
-    file_id = register_file(
-        original_name=filename,
-        stored_name=stored_name,
-        content_type=upload.content_type,
-        size=size,
-        retention_hours=retention_hours,
-        file_id=file_id,
-    )
+    try:
+        file_id = register_file(
+            original_name=filename,
+            stored_name=stored_name,
+            content_type=upload.content_type,
+            size=size,
+            retention_hours=retention_hours,
+            file_id=file_id,
+        )
+    except Exception:
+        lifecycle_logger.exception(
+            "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+        )
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        return _s3_error_response(
+            "InternalError",
+            "Failed to register uploaded file.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
 
     record = get_file(file_id)
-    direct_path = record["direct_path"] if record and record["direct_path"] else None
+    if not record:
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        lifecycle_logger.error(
+            "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
+            bucket,
+            key,
+            file_id,
+        )
+        return _s3_error_response(
+            "InternalError",
+            "Failed to load uploaded file metadata.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
+
+    direct_path = record["direct_path"] if record["direct_path"] else None
     if direct_path:
         location = url_for(
             "serve_raw_file",
@@ -1453,13 +1563,28 @@ def s3_put_object(bucket: str, key: str):
     stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
     upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
 
-    with upload_path.open("wb") as destination:
-        while True:
-            chunk = stream.read(1024 * 1024)
-            if not chunk:
-                break
-            destination.write(chunk)
-            hash_md5.update(chunk)
+    try:
+        with upload_path.open("wb") as destination:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+                hash_md5.update(chunk)
+    except Exception:
+        lifecycle_logger.exception(
+            "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+        )
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        return _s3_error_response(
+            "InternalError",
+            "Failed to store uploaded file.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
 
     try:
         retention_hours = resolve_retention(
@@ -1491,17 +1616,50 @@ def s3_put_object(bucket: str, key: str):
     size = upload_path.stat().st_size
     content_type = request.headers.get("Content-Type")
 
-    file_id = register_file(
-        original_name=filename,
-        stored_name=stored_name,
-        content_type=content_type,
-        size=size,
-        retention_hours=retention_hours,
-        file_id=file_id,
-    )
+    try:
+        file_id = register_file(
+            original_name=filename,
+            stored_name=stored_name,
+            content_type=content_type,
+            size=size,
+            retention_hours=retention_hours,
+            file_id=file_id,
+        )
+    except Exception:
+        lifecycle_logger.exception(
+            "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+        )
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        return _s3_error_response(
+            "InternalError",
+            "Failed to register uploaded file.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
 
     record = get_file(file_id)
-    direct_path = record["direct_path"] if record and record["direct_path"] else None
+    if not record:
+        if upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+        lifecycle_logger.error(
+            "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
+            bucket,
+            key,
+            file_id,
+        )
+        return _s3_error_response(
+            "InternalError",
+            "Failed to load uploaded file metadata.",
+            bucket=bucket,
+            key=key,
+            status_code=500,
+        )
+
+    direct_path = record["direct_path"] if record["direct_path"] else None
     if direct_path:
         location = url_for(
             "serve_raw_file",
