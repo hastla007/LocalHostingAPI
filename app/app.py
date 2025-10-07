@@ -20,6 +20,8 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode as _compat_urlencode
 
+from itsdangerous import BadSignature, URLSafeSerializer
+
 try:
     import werkzeug.urls as _werkzeug_urls
 
@@ -131,6 +133,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for test environments
 from .storage import (
     DATA_DIR,
     LOGS_DIR,
+    UPLOADS_DIR,
     RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
     delete_file,
@@ -164,6 +167,67 @@ logging.basicConfig(
     level=numeric_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
+
+def _load_secret_key() -> str:
+    env_secret = os.environ.get("SECRET_KEY")
+    if env_secret:
+        return env_secret
+
+    secret_path = DATA_DIR / ".secret_key"
+    try:
+        if secret_path.exists():
+            existing = secret_path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+
+        ensure_directories()
+        generated = secrets.token_hex(32)
+        secret_path.write_text(generated, encoding="utf-8")
+        try:
+            secret_path.chmod(0o600)
+        except OSError:
+            logging.getLogger("localhosting.config").warning(
+                "Unable to set secret key permissions for %s", secret_path
+            )
+        logging.warning("Generated new secret key - stored in %s", secret_path)
+        return generated
+    except OSError as error:
+        logging.getLogger("localhosting.config").warning(
+            "Falling back to in-memory secret key: %s", error
+        )
+        return secrets.token_hex(32)
+
+
+SECRET_KEY_VALUE = _load_secret_key()
+_api_key_serializer: Optional[URLSafeSerializer] = None
+
+
+def _get_api_key_serializer() -> Optional[URLSafeSerializer]:
+    global _api_key_serializer
+    if _api_key_serializer is None:
+        try:
+            _api_key_serializer = URLSafeSerializer(SECRET_KEY_VALUE, salt="api-key")
+        except Exception:
+            return None
+    return _api_key_serializer
+
+
+def _encrypt_api_key(value: str) -> str:
+    serializer = _get_api_key_serializer()
+    if not serializer:
+        return ""
+    return serializer.dumps(value)
+
+
+def _decrypt_api_key(token: str) -> Optional[str]:
+    serializer = _get_api_key_serializer()
+    if not serializer or not token:
+        return None
+    try:
+        return serializer.loads(token)
+    except (BadSignature, ValueError):
+        return None
 
 
 class RequestAwareLogger:
@@ -388,7 +452,11 @@ def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
         return None
     for entry in _iter_api_keys(config):
         if entry.get("id") == key_id:
-            return entry
+            result = dict(entry)
+            plaintext = _decrypt_api_key(entry.get("key_encrypted", ""))
+            result["key"] = plaintext or ""
+            result["has_plaintext"] = bool(plaintext)
+            return result
     return None
 
 
@@ -477,6 +545,7 @@ def _generate_api_key_entry(label: str = "") -> dict:
         "id": uuid.uuid4().hex,
         "key": raw_key,
         "key_hash": hash_api_key(raw_key),
+        "key_encrypted": _encrypt_api_key(raw_key),
         "label": (label or "").strip(),
         "created_at": time.time(),
     }
@@ -522,31 +591,7 @@ try:
 except ValueError:
     max_upload_size_mb = 500
 app.config["MAX_CONTENT_LENGTH"] = max(1, max_upload_size_mb) * 1024 * 1024
-
-secret_key = os.environ.get("SECRET_KEY")
-if not secret_key:
-    secret_path = DATA_DIR / ".secret_key"
-    try:
-        if secret_path.exists():
-            secret_key = secret_path.read_text(encoding="utf-8").strip()
-        else:
-            ensure_directories()
-            secret_key = secrets.token_hex(32)
-            secret_path.write_text(secret_key, encoding="utf-8")
-            try:
-                secret_path.chmod(0o600)
-            except OSError:
-                logging.getLogger("localhosting.config").warning(
-                    "Unable to set secret key permissions for %s", secret_path
-                )
-            logging.warning("Generated new secret key - stored in %s", secret_path)
-    except OSError as error:
-        logging.getLogger("localhosting.config").warning(
-            "Falling back to in-memory secret key: %s", error
-        )
-        secret_key = secrets.token_hex(32)
-
-app.config["SECRET_KEY"] = secret_key
+app.config["SECRET_KEY"] = SECRET_KEY_VALUE
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 

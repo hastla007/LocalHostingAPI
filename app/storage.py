@@ -121,10 +121,14 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
                 except (TypeError, ValueError):
                     created_at = time.time()
                 label = entry.get("label") if isinstance(entry.get("label"), str) else ""
+                encrypted_value = ""
+                if isinstance(entry.get("key_encrypted"), str):
+                    encrypted_value = entry.get("key_encrypted").strip()
                 cleaned_items.append(
                     {
                         "id": entry_id,
                         "key_hash": key_hash,
+                        "key_encrypted": encrypted_value,
                         "label": label.strip(),
                         "created_at": created_at,
                     }

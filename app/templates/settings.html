@@ -122,6 +122,11 @@
           Dashboard uploads currently do not have an assigned API key. Set a key as the dashboard default below to continue
           uploading from the browser.
         </p>
+      {% elif api_auth_enabled and api_ui_key and not api_ui_key.has_plaintext %}
+        <p class="form-help warning">
+          The selected dashboard API key cannot be retrieved securely. Generate a new key or promote a recently created key to
+          restore browser uploads.
+        </p>
       {% endif %}
 
       <button type="submit" class="button primary">Update API Authentication</button>

@@ -595,6 +595,9 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertTrue(config["api_auth_enabled"])
         self.assertTrue(config["api_keys"])
         self.assertIn("key_hash", config["api_keys"][0])
+        self.assertIn("key_encrypted", config["api_keys"][0])
+        self.assertTrue(config["api_keys"][0]["key_encrypted"])
+        self.assertNotIn("key", config["api_keys"][0])
 
         unauthorized = self.client.post(
             "/fileupload",
@@ -602,6 +605,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(unauthorized.status_code, 401)
+
+        upload_page = self.client.get("/upload-a-file")
+        self.assertEqual(upload_page.status_code, 200)
+        upload_markup = upload_page.get_data(as_text=True)
+        self.assertIn(api_key, upload_markup)
 
         authorized = self.client.post(
             "/fileupload",

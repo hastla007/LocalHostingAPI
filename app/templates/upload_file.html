@@ -7,6 +7,11 @@
         API authentication is enabled but no dashboard API key has been assigned. Set a key in the settings page to upload from
         the browser.
       </p>
+    {% elif api_auth_enabled and api_ui_key and not api_ui_key.has_plaintext %}
+      <p class="form-help warning">
+        The dashboard API key was created before secure storage was enabled. Generate a new key or reassign the dashboard key to
+        restore browser uploads.
+      </p>
     {% endif %}
     <form
       id="upload-form"
