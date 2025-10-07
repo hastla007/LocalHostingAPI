@@ -461,6 +461,15 @@ main {
   margin: 0.5rem 0 0;
 }
 
+.form-help.warning {
+  color: #b45309;
+  background-color: #fff7ed;
+  border-left: 3px solid #f97316;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin-top: 0.75rem;
+}
+
 .auth-card {
   max-width: 420px;
   margin: 0 auto 2rem;
@@ -654,6 +663,117 @@ main {
 .time-remaining {
   font-weight: 600;
   color: #0369a1;
+}
+
+.api-key-management {
+  margin-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.generate-key-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.generate-key-form label {
+  font-weight: 600;
+}
+
+.generate-key-form input[type="text"] {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #cbd5f5;
+  font-size: 0.95rem;
+}
+
+.generate-key-form button {
+  justify-self: start;
+}
+
+.api-key-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.api-key-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1rem;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.api-key-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.api-key-label {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.api-key-created {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.badge {
+  display: inline-block;
+  background: #f97316;
+  color: #ffffff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  margin-left: 0.5rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.api-key-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.api-key-value {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.api-key-value input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #cbd5f5;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.api-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.api-key-actions .button {
+  min-width: 160px;
 }
 
 input[type="number"] {

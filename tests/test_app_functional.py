@@ -160,6 +160,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         response = self.client.post(
             "/settings",
             data={
+                "action": "update_retention",
                 "retention_min_hours": "1",
                 "retention_max_hours": "48",
                 "retention_hours": "12",
@@ -172,6 +173,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(config["retention_max_hours"], 48.0)
         self.assertEqual(config["retention_hours"], 12.0)
         self.assertFalse(config["ui_auth_enabled"])
+        self.assertFalse(config["api_auth_enabled"])
 
     def test_upload_page_renders(self):
         response = self.client.get("/upload-a-file")
@@ -288,6 +290,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         response = self.client.post(
             "/settings",
             data={
+                "action": "update_retention",
                 "retention_min_hours": "-1",
                 "retention_max_hours": "48",
                 "retention_hours": "12",
@@ -308,6 +311,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         enable_response = self.client.post(
             "/settings",
             data={
+                "action": "update_ui_auth",
                 "retention_min_hours": "0",
                 "retention_max_hours": "168",
                 "retention_hours": "24",
@@ -572,6 +576,116 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.mimetype, "application/xml")
         root = ET.fromstring(response.data)
         self.assertEqual(root.findtext("Code"), "InvalidRequest")
+
+    def test_api_authentication_requires_key_for_fileupload(self):
+        enable = self.client.post(
+            "/settings",
+            data={"action": "update_api_auth", "api_auth_enabled": "on"},
+            follow_redirects=True,
+        )
+        self.assertEqual(enable.status_code, 200)
+
+        config = self.storage.load_config()
+        self.assertTrue(config["api_auth_enabled"])
+        self.assertTrue(config["api_keys"])
+        api_key = config["api_keys"][0]["key"]
+
+        unauthorized = self.client.post(
+            "/fileupload",
+            data={"file": (io.BytesIO(b"blocked"), "blocked.txt")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        authorized = self.client.post(
+            "/fileupload",
+            data={"file": (io.BytesIO(b"allowed"), "allowed.txt")},
+            content_type="multipart/form-data",
+            headers={"X-API-Key": api_key},
+        )
+        self.assertEqual(authorized.status_code, 201)
+        payload = authorized.get_json()
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["filename"], "allowed.txt")
+
+    def test_api_authentication_applies_to_s3_and_box(self):
+        self.client.post(
+            "/settings",
+            data={"action": "update_api_auth", "api_auth_enabled": "on"},
+            follow_redirects=True,
+        )
+        config = self.storage.load_config()
+        api_key = config["api_keys"][0]["key"]
+
+        s3_unauthorized = self.client.post(
+            "/s3/test-bucket",
+            data={"file": (io.BytesIO(b"s3"), "s3.txt")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(s3_unauthorized.status_code, 403)
+
+        s3_authorized = self.client.post(
+            "/s3/test-bucket",
+            data={"file": (io.BytesIO(b"s3 auth"), "s3-auth.txt")},
+            content_type="multipart/form-data",
+            headers={"X-API-Key": api_key},
+        )
+        self.assertEqual(s3_authorized.status_code, 201)
+
+        box_unauthorized = self.client.post(
+            "/2.0/files/content",
+            data={"file": (io.BytesIO(b"box"), "box.txt")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(box_unauthorized.status_code, 401)
+
+        box_authorized = self.client.post(
+            "/2.0/files/content",
+            data={"file": (io.BytesIO(b"box auth"), "box-auth.txt")},
+            content_type="multipart/form-data",
+            headers={"X-API-Key": api_key},
+        )
+        self.assertEqual(box_authorized.status_code, 201)
+
+    def test_api_key_management_via_settings(self):
+        self.client.post(
+            "/settings",
+            data={"action": "update_api_auth", "api_auth_enabled": "on"},
+            follow_redirects=True,
+        )
+        config = self.storage.load_config()
+        original_keys = config["api_keys"]
+        self.assertTrue(original_keys)
+        initial_id = original_keys[0]["id"]
+
+        self.client.post(
+            "/settings",
+            data={"action": "generate_api_key", "api_key_label": "Build Server"},
+            follow_redirects=True,
+        )
+        config = self.storage.load_config()
+        self.assertGreaterEqual(len(config["api_keys"]), 2)
+        labelled = [entry for entry in config["api_keys"] if entry["label"] == "Build Server"]
+        self.assertTrue(labelled)
+        new_key_id = labelled[0]["id"]
+
+        self.client.post(
+            "/settings",
+            data={"action": "set_primary_api_key", "api_key_id": new_key_id},
+            follow_redirects=True,
+        )
+        config = self.storage.load_config()
+        self.assertEqual(config["api_ui_key_id"], new_key_id)
+
+        self.client.post(
+            "/settings",
+            data={"action": "delete_api_key", "api_key_id": initial_id},
+            follow_redirects=True,
+        )
+        config = self.storage.load_config()
+        remaining_ids = {entry["id"] for entry in config["api_keys"]}
+        self.assertNotIn(initial_id, remaining_ids)
+        self.assertEqual(config["api_ui_key_id"], new_key_id)
 
 
 if __name__ == "__main__":

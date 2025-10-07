@@ -41,6 +41,9 @@ DEFAULT_CONFIG = {
     "ui_auth_enabled": False,
     "ui_username": "admin",
     "ui_password_hash": _default_password_hash(),
+    "api_auth_enabled": False,
+    "api_keys": [],
+    "api_ui_key_id": "",
 }
 
 CONFIG_NUMERIC_KEYS = {
@@ -49,9 +52,11 @@ CONFIG_NUMERIC_KEYS = {
     "retention_max_hours",
 }
 
-CONFIG_BOOLEAN_KEYS = {"ui_auth_enabled"}
+CONFIG_BOOLEAN_KEYS = {"ui_auth_enabled", "api_auth_enabled"}
 
-CONFIG_STRING_KEYS = {"ui_username", "ui_password_hash"}
+CONFIG_STRING_KEYS = {"ui_username", "ui_password_hash", "api_ui_key_id"}
+
+CONFIG_LIST_KEYS = {"api_keys"}
 
 
 def _coerce_numeric(value, default):
@@ -98,6 +103,38 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
                 continue
             config[key] = value or config[key]
 
+    for key in CONFIG_LIST_KEYS:
+        if key in raw_config and isinstance(raw_config.get(key), list):
+            cleaned_items = []
+            for entry in raw_config.get(key):
+                if not isinstance(entry, dict):
+                    continue
+                key_value = str(entry.get("key", "")).strip()
+                if not key_value:
+                    continue
+                entry_id = str(entry.get("id") or uuid.uuid4().hex)
+                try:
+                    created_at = float(entry.get("created_at", time.time()))
+                except (TypeError, ValueError):
+                    created_at = time.time()
+                label = entry.get("label") if isinstance(entry.get("label"), str) else ""
+                cleaned_items.append(
+                    {
+                        "id": entry_id,
+                        "key": key_value,
+                        "label": label.strip(),
+                        "created_at": created_at,
+                    }
+                )
+            unique_items = []
+            seen_ids = set()
+            for entry in cleaned_items:
+                if entry["id"] in seen_ids:
+                    continue
+                seen_ids.add(entry["id"])
+                unique_items.append(entry)
+            config[key] = unique_items
+
     if not isinstance(config["ui_username"], str) or not config["ui_username"].strip():
         config["ui_username"] = DEFAULT_CONFIG["ui_username"]
 
@@ -105,6 +142,15 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
         config["ui_password_hash"] = DEFAULT_CONFIG["ui_password_hash"]
 
     config["ui_username"] = config["ui_username"].strip()
+
+    if not isinstance(config.get("api_ui_key_id"), str):
+        config["api_ui_key_id"] = ""
+
+    if config.get("api_ui_key_id"):
+        valid_ids = {entry["id"] for entry in config.get("api_keys", [])}
+        if config["api_ui_key_id"] not in valid_ids:
+            config["api_ui_key_id"] = ""
+
     return config
 
 

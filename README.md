@@ -56,6 +56,12 @@ Authentication for the HTML dashboard is disabled by default so anyone on the lo
 
 Once UI auth is turned on, visits to `/hosting`, `/upload-a-file`, `/logs`, `/api-docs`, and `/settings` will redirect to the `/login` page until valid credentials are supplied. API endpoints remain unauthenticated so existing integrations continue to work. Use the **Log out** control in the navigation bar to end the session.
 
+### Optional API Authentication
+
+REST endpoints (`/fileupload`, the S3-compatible routes, and the Box-compatible routes) accept requests without credentials by default. You can require API keys from the settings page by toggling **Require API keys for upload endpoints**. The dashboard lets you generate, delete, and label keys, and you can designate one key as the “Dashboard Default” so browser uploads continue to work without manual input.
+
+When API authentication is enabled, clients must send the key in an `X-API-Key` header (or `Authorization: Bearer <key>`). The same header works across the native, S3, and Box endpoints; you can also supply a simple `api_key` query parameter for tooling that cannot set headers. Rotate or revoke keys at any time—changes take effect immediately.
+
 ## Project Structure
 
 ```

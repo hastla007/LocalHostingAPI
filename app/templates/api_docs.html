@@ -12,6 +12,29 @@
   </section>
 
   <section class="card">
+    <h2>Authentication</h2>
+    <p>
+      API authentication is
+      {% if config.api_auth_enabled %}<strong>currently enabled</strong>{% else %}<strong>disabled</strong>{% endif %}
+      by default. When authentication is enabled on the <a href="{{ url_for('settings') }}">settings</a> page, every API request
+      must include a valid key generated from the dashboard.
+    </p>
+    <ul>
+      <li>Provide the key via the <code>X-API-Key</code> header (recommended) or as an <code>Authorization: Bearer &lt;key&gt;</code> header.</li>
+      <li>The <code>api_key</code> query-string parameter is also honoured for simple integrations.</li>
+      <li>Keys affect all upload endpoints, including the S3- and Box-compatible routes documented below.</li>
+    </ul>
+    <p>
+      The dashboard automatically applies the key marked as “Dashboard Default” for browser uploads. Rotate or revoke keys at
+      any time from the settings page.
+    </p>
+    <h3>Authenticated cURL Example</h3>
+    <pre><code>curl -H "X-API-Key: YOUR_API_KEY" \
+  -F "file=@/path/to/your/file" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+  </section>
+
+  <section class="card">
     <h2>Upload a File</h2>
     <p><strong>Endpoint:</strong> <code>POST /fileupload</code></p>
     <p>
@@ -25,9 +48,13 @@
       <li><code>retention_hours</code> &mdash; number of hours to keep this upload (must be within the configured range).</li>
     </ul>
     <h3>Single File cURL Example</h3>
-    <pre><code>curl -F "file=@/path/to/your/file" {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+    <pre><code>curl -F "file=@/path/to/your/file" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
     <h3>Multi-file cURL Example</h3>
-    <pre><code>curl -F "file=@/path/to/first.txt" -F "file=@/path/to/second.jpg" -F "retention_hours=6" {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+    <pre><code>curl -F "file=@/path/to/first.txt" \
+  -F "file=@/path/to/second.jpg" \
+  -F "retention_hours=6" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
     <h3>Sample JSON Response</h3>
     <pre><code>{
   "id": "b0f6f1a3a2f744e0a33e8b9ef9b31dc7",
@@ -95,6 +122,7 @@
       Send a multipart form submission that includes the standard S3 fields such as <code>key</code> and <code>file</code>. Optional
       retention can be provided with the custom field <code>x-amz-meta-retention-hours</code>.
     </p>
+    <p>Include the <code>X-API-Key</code> header when API authentication is enabled.</p>
     <pre><code>curl -X POST \
   -F "key=uploads/${filename}" \
   -F "x-amz-meta-retention-hours=12" \
@@ -112,6 +140,7 @@
       Issue a raw PUT with the file contents in the request body. Custom retention is accepted through the
       <code>X-Amz-Meta-Retention-Hours</code> header or a <code>retentionHours</code> query parameter.
     </p>
+    <p>Provide the same <code>X-API-Key</code> header if authentication is enabled for the service.</p>
     <pre><code>curl -X PUT \
   -H "Content-Type: video/mp4" \
   -H "X-Amz-Meta-Retention-Hours: 24" \
@@ -136,6 +165,7 @@
       an <code>attributes</code> field containing JSON, matching the payload format the Box API expects. The response
       returns an <code>entries</code> array with Box-style metadata including SHA-1 hashes and shareable download URLs.
     </p>
+    <p>All Box-compatible requests accept the <code>X-API-Key</code> or <code>Authorization</code> header when API authentication is active.</p>
     <pre><code>curl -X POST \
   -F "attributes={\"name\":\"report.pdf\"}" \
   -F "file=@/path/to/report.pdf" \

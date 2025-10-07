@@ -3,15 +3,17 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 import uuid
+from copy import deepcopy
 from collections import deque
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from secrets import compare_digest
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 
@@ -235,6 +237,104 @@ def require_ui_auth(view):
     return wrapped
 
 
+def api_auth_enabled() -> bool:
+    config = get_config()
+    return bool(config.get("api_auth_enabled"))
+
+
+def _iter_api_keys(config: Optional[Dict[str, Any]] = None) -> Iterable[dict]:
+    config = config or get_config()
+    for entry in config.get("api_keys", []):
+        if isinstance(entry, dict) and entry.get("key") and entry.get("id"):
+            yield entry
+
+
+def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
+    config = config or get_config()
+    key_id = config.get("api_ui_key_id") or ""
+    if not key_id:
+        return None
+    for entry in _iter_api_keys(config):
+        if entry.get("id") == key_id:
+            return entry
+    return None
+
+
+def _extract_api_key_from_request() -> Optional[str]:
+    header_key = request.headers.get("X-API-Key")
+    if header_key:
+        return header_key.strip()
+
+    authorization = request.headers.get("Authorization", "").strip()
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    if authorization.lower().startswith("token "):
+        return authorization[6:].strip()
+
+    query_key = request.args.get("api_key")
+    if query_key:
+        return query_key.strip()
+
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict):
+            json_key = payload.get("api_key")
+            if isinstance(json_key, str):
+                return json_key.strip()
+    return None
+
+
+def _api_auth_error(response_format: str = "json") -> Response:
+    message = "API authentication required."
+    if response_format == "box":
+        return _box_error("access_denied", message, status=401)
+    if response_format == "s3":
+        return _s3_error_response("AccessDenied", message, status_code=403)
+    return make_response(jsonify({"error": message}), 401)
+
+
+def _api_key_matches(provided: Optional[str]) -> bool:
+    if not provided:
+        return False
+    for entry in _iter_api_keys():
+        if compare_digest(entry.get("key", ""), provided):
+            return True
+    return False
+
+
+def require_api_auth(response_format: str = "json"):
+    def decorator(view: Callable):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if not api_auth_enabled():
+                return view(*args, **kwargs)
+
+            if ui_auth_enabled() and ui_user_authenticated():
+                return view(*args, **kwargs)
+
+            provided = _extract_api_key_from_request()
+            if _api_key_matches(provided):
+                return view(*args, **kwargs)
+
+            lifecycle_logger.warning(
+                "api_auth_failed endpoint=%s method=%s", request.endpoint, request.method
+            )
+            return _api_auth_error(response_format)
+
+        return wrapped
+
+    return decorator
+
+
+def _generate_api_key_entry(label: str = "") -> dict:
+    return {
+        "id": uuid.uuid4().hex,
+        "key": secrets.token_urlsafe(32),
+        "label": (label or "").strip(),
+        "created_at": time.time(),
+    }
+
+
 class _FallbackCleanupScheduler:
     """Minimal interval scheduler used when APScheduler is unavailable."""
 
@@ -275,6 +375,8 @@ def inject_ui_state():
         "ui_auth_enabled": bool(config.get("ui_auth_enabled")),
         "ui_authenticated": ui_user_authenticated(),
         "ui_username": config.get("ui_username", "admin"),
+        "api_auth_enabled": bool(config.get("api_auth_enabled")),
+        "api_ui_key_id": config.get("api_ui_key_id", ""),
     }
 
 # Schedule periodic cleanup so requests are not blocked by retention pruning.
@@ -495,7 +597,12 @@ def hosting():
 @require_ui_auth
 def upload_file_page():
     config = get_config()
-    return render_template("upload_file.html", config=config)
+    return render_template(
+        "upload_file.html",
+        config=config,
+        api_auth_enabled=bool(config.get("api_auth_enabled")),
+        api_ui_key=get_ui_api_key(config),
+    )
 
 
 @app.route("/api-docs")
@@ -546,81 +653,181 @@ def hosting_delete(file_id: str):
 def settings():
     config = get_config()
     if request.method == "POST":
-        try:
-            retention_min = float(
-                request.form.get("retention_min_hours", config["retention_min_hours"])
+        action = request.form.get("action", "update_retention")
+        refreshed = False
+
+        if action == "update_retention":
+            try:
+                retention_min = float(
+                    request.form.get("retention_min_hours", config["retention_min_hours"])
+                )
+                retention_max = float(
+                    request.form.get("retention_max_hours", config["retention_max_hours"])
+                )
+                retention_hours = float(
+                    request.form.get("retention_hours", config["retention_hours"])
+                )
+            except (TypeError, ValueError):
+                flash("Please provide valid numbers for retention settings.", "error")
+                return render_template("settings.html", config=config, api_ui_key=get_ui_api_key(config))
+
+            proposed = deepcopy(config)
+            proposed.update(
+                {
+                    "retention_min_hours": retention_min,
+                    "retention_max_hours": retention_max,
+                    "retention_hours": retention_hours,
+                }
             )
-            retention_max = float(
-                request.form.get("retention_max_hours", config["retention_max_hours"])
+
+            if retention_min < 0:
+                flash("Minimum retention cannot be negative.", "error")
+                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+            if retention_max < retention_min:
+                flash(
+                    "Maximum retention must be greater than or equal to the minimum.",
+                    "error",
+                )
+                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+            if not (retention_min <= retention_hours <= retention_max):
+                flash(
+                    "Default retention must fall within the configured bounds.",
+                    "error",
+                )
+                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
+            lifecycle_logger.info(
+                "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
+                retention_min,
+                retention_max,
+                retention_hours,
             )
-            retention_hours = float(
-                request.form.get("retention_hours", config["retention_hours"])
+            flash("Retention settings updated.", "success")
+
+        elif action == "update_ui_auth":
+            auth_enabled = request.form.get("ui_auth_enabled") == "on"
+            username = request.form.get("ui_username", config.get("ui_username", "admin")).strip()
+            password = request.form.get("ui_password", "")
+            confirm = request.form.get("ui_password_confirm", "")
+
+            proposed = deepcopy(config)
+            proposed["ui_auth_enabled"] = auth_enabled
+            proposed["ui_username"] = username or config.get("ui_username", "admin")
+
+            if auth_enabled and not username:
+                flash("Username cannot be empty when UI authentication is enabled.", "error")
+                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+
+            if password or confirm:
+                if password != confirm:
+                    flash("Password confirmation does not match.", "error")
+                    return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                proposed["ui_password_hash"] = generate_password_hash(password)
+
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
+
+            if auth_enabled:
+                session["ui_authenticated"] = True
+                session["ui_username"] = proposed["ui_username"]
+            else:
+                session.pop("ui_authenticated", None)
+                session.pop("ui_username", None)
+
+            lifecycle_logger.info(
+                "ui_auth_updated enabled=%s username=%s",
+                auth_enabled,
+                proposed["ui_username"],
             )
-        except (TypeError, ValueError):
-            flash("Please provide valid numbers for retention settings.", "error")
-            return render_template("settings.html", config=config)
+            flash("UI authentication settings updated.", "success")
 
-        proposed_config = config.copy()
-        proposed_config.update(
-            {
-                "retention_min_hours": retention_min,
-                "retention_max_hours": retention_max,
-                "retention_hours": retention_hours,
-            }
-        )
+        elif action == "update_api_auth":
+            enable_api_auth = request.form.get("api_auth_enabled") == "on"
+            proposed = deepcopy(config)
+            proposed["api_auth_enabled"] = enable_api_auth
 
-        auth_enabled = request.form.get("ui_auth_enabled") == "on"
-        username = request.form.get("ui_username", config.get("ui_username", "admin")).strip()
-        password = request.form.get("ui_password", "")
-        confirm = request.form.get("ui_password_confirm", "")
+            auto_key = None
+            if enable_api_auth and not list(_iter_api_keys(proposed)):
+                auto_key = _generate_api_key_entry()
+                proposed.setdefault("api_keys", []).append(auto_key)
+                proposed["api_ui_key_id"] = auto_key["id"]
 
-        proposed_config["ui_auth_enabled"] = auth_enabled
-        proposed_config["ui_username"] = username or config.get("ui_username", "admin")
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
 
-        if auth_enabled and not username:
-            flash("Username cannot be empty when UI authentication is enabled.", "error")
-            return render_template("settings.html", config=proposed_config)
+            lifecycle_logger.info("api_auth_updated enabled=%s", enable_api_auth)
+            if auto_key:
+                lifecycle_logger.info("api_key_generated id=%s", auto_key["id"])
+                flash(
+                    "API authentication enabled. A new key was generated automatically.",
+                    "info",
+                )
+            flash("API authentication settings updated.", "success")
 
-        if password or confirm:
-            if password != confirm:
-                flash("Password confirmation does not match.", "error")
-                return render_template("settings.html", config=proposed_config)
-            proposed_config["ui_password_hash"] = generate_password_hash(password)
+        elif action == "generate_api_key":
+            label = request.form.get("api_key_label", "").strip()
+            new_key = _generate_api_key_entry(label)
+            proposed = deepcopy(config)
+            proposed.setdefault("api_keys", []).append(new_key)
+            if not proposed.get("api_ui_key_id"):
+                proposed["api_ui_key_id"] = new_key["id"]
 
-        if retention_min < 0:
-            flash("Minimum retention cannot be negative.", "error")
-            return render_template("settings.html", config=proposed_config)
-        if retention_max < retention_min:
-            flash("Maximum retention must be greater than or equal to the minimum.", "error")
-            return render_template("settings.html", config=proposed_config)
-        if not (retention_min <= retention_hours <= retention_max):
-            flash("Default retention must fall within the configured bounds.", "error")
-            return render_template("settings.html", config=proposed_config)
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
 
-        save_config(proposed_config)
-        get_config(refresh=True)
+            lifecycle_logger.info("api_key_generated id=%s label=%s", new_key["id"], label or "")
+            flash(f"Generated new API key: {new_key['key']}", "success")
 
-        if auth_enabled:
-            session["ui_authenticated"] = True
-            session["ui_username"] = proposed_config["ui_username"]
+        elif action == "delete_api_key":
+            key_id = request.form.get("api_key_id", "").strip()
+            proposed = deepcopy(config)
+            before = list(_iter_api_keys(proposed))
+            remaining = [entry for entry in before if entry.get("id") != key_id]
+
+            if len(remaining) == len(before):
+                flash("API key not found.", "error")
+                return redirect(url_for("settings"))
+
+            proposed["api_keys"] = remaining
+            if proposed.get("api_ui_key_id") == key_id:
+                proposed["api_ui_key_id"] = remaining[0]["id"] if remaining else ""
+
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
+
+            lifecycle_logger.info("api_key_deleted id=%s", key_id)
+            flash("API key deleted.", "success")
+
+        elif action == "set_primary_api_key":
+            key_id = request.form.get("api_key_id", "").strip()
+            proposed = deepcopy(config)
+            if not any(entry.get("id") == key_id for entry in _iter_api_keys(proposed)):
+                flash("API key not found.", "error")
+                return redirect(url_for("settings"))
+
+            proposed["api_ui_key_id"] = key_id
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
+
+            lifecycle_logger.info("api_key_promoted id=%s", key_id)
+            flash("Dashboard uploads will use the selected API key.", "success")
+
         else:
-            session.pop("ui_authenticated", None)
-            session.pop("ui_username", None)
+            flash("Unsupported settings action.", "error")
 
-        lifecycle_logger.info(
-            "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
-            retention_min,
-            retention_max,
-            retention_hours,
-        )
-        lifecycle_logger.info(
-            "ui_auth_updated enabled=%s username=%s",
-            auth_enabled,
-            proposed_config["ui_username"],
-        )
-        flash("Settings updated successfully.", "success")
+        if refreshed:
+            config = get_config()
         return redirect(url_for("settings"))
-    return render_template("settings.html", config=config)
+
+    return render_template("settings.html", config=config, api_ui_key=get_ui_api_key(config))
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -666,6 +873,7 @@ def logout():
 
 
 @app.route("/fileupload", methods=["POST"])
+@require_api_auth()
 def fileupload():
     if "file" not in request.files:
         app.logger.warning("upload_failed reason=no_file_part")
@@ -844,6 +1052,7 @@ def direct_download(file_id: str, filename: str):
 
 
 @app.route("/2.0/files/content", methods=["POST"])
+@require_api_auth("box")
 def box_upload_files():
     config = get_config()
     uploads = request.files.getlist("file")
@@ -1007,6 +1216,7 @@ def box_upload_files():
 
 
 @app.route("/2.0/files/<file_id>/content", methods=["GET"])
+@require_api_auth("box")
 def box_download_file(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -1038,6 +1248,7 @@ def box_download_file(file_id: str):
 
 
 @app.route("/2.0/file_requests/<file_id>", methods=["GET"])
+@require_api_auth("box")
 def box_file_request(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -1124,6 +1335,7 @@ def serve_raw_file(direct_path: str):
 
 
 @app.route("/s3/<bucket>", methods=["POST"])
+@require_api_auth("s3")
 def s3_multipart_upload(bucket: str):
     config = get_config()
     upload = request.files.get("file")
@@ -1230,6 +1442,7 @@ def s3_multipart_upload(bucket: str):
 
 
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
+@require_api_auth("s3")
 def s3_put_object(bucket: str, key: str):
     config = get_config()
     stream = request.stream
