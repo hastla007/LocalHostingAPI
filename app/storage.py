@@ -176,19 +176,27 @@ def _generate_unique_direct_path(
 
 def backfill_direct_paths() -> None:
     with get_db() as conn:
-        existing_cursor = conn.execute(
-            "SELECT direct_path FROM files WHERE direct_path IS NOT NULL"
-        )
-        taken_paths = {
-            row["direct_path"] for row in existing_cursor.fetchall() if row["direct_path"]
-        }
         cursor = conn.execute(
             "SELECT id, original_name, direct_path FROM files ORDER BY uploaded_at"
         )
         rows = cursor.fetchall()
+
+        taken_paths: Set[str] = {
+            row["direct_path"]
+            for row in rows
+            if row["direct_path"]
+            and row["direct_path"].lower() not in RESERVED_DIRECT_PATHS
+        }
+
         for row in rows:
-            if row["direct_path"]:
+            current_path = row["direct_path"]
+            needs_regeneration = not current_path or (
+                current_path.lower() in RESERVED_DIRECT_PATHS
+            )
+
+            if not needs_regeneration:
                 continue
+
             direct_path = _generate_unique_direct_path(
                 conn,
                 row["original_name"],
@@ -199,6 +207,7 @@ def backfill_direct_paths() -> None:
                 "UPDATE files SET direct_path = ? WHERE id = ?",
                 (direct_path, row["id"]),
             )
+
         conn.commit()
 
 

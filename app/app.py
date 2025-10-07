@@ -42,6 +42,14 @@ from .storage import (
     ensure_directories,
 )
 
+RESERVED_ROUTE_ENDPOINTS = {
+    "hosting": "hosting",
+    "upload-a-file": "upload_file_page",
+    "logs": "logs_page",
+    "api-docs": "api_docs",
+    "settings": "settings",
+}
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
 logging.basicConfig(
@@ -623,12 +631,24 @@ def serve_raw_file(direct_path: str):
     normalized = direct_path.strip("/")
     if not normalized:
         abort(404)
+
     first_segment = normalized.split("/", 1)[0]
-    if first_segment.lower() in RESERVED_DIRECT_PATHS:
+    first_segment_lower = first_segment.lower()
+
+    if "/" not in normalized and first_segment_lower in RESERVED_ROUTE_ENDPOINTS:
+        endpoint = RESERVED_ROUTE_ENDPOINTS[first_segment_lower]
+        canonical = url_for(endpoint)
+        if request.path != canonical:
+            return redirect(canonical, code=308)
+        abort(404)
+
+    if first_segment_lower in RESERVED_DIRECT_PATHS:
         abort(404)
 
     record = get_file_by_direct_path(normalized)
     if not record:
+        if first_segment_lower in RESERVED_ROUTE_ENDPOINTS:
+            abort(404)
         lifecycle_logger.warning("file_raw_missing direct_path=%s", normalized)
         abort(404)
     if record["expires_at"] < time.time():

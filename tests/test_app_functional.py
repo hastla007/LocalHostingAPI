@@ -170,6 +170,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Upload a File", response.data)
 
+    def test_navigation_includes_logs_link(self):
+        response = self.client.get("/hosting")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b">Logs<", response.data)
+
     def test_logs_page_renders_and_returns_payload(self):
         with self.app.app_context():
             self.app.logger.info("integration log entry")
@@ -186,6 +191,42 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["source"], "application")
         self.assertIn("log entry", payload.get("text", ""))
+
+    def test_logs_route_redirects_from_case_variants(self):
+        response = self.client.get("/Logs", follow_redirects=False)
+        self.assertEqual(response.status_code, 308)
+        self.assertEqual(response.headers.get("Location"), "/logs")
+
+    def test_reserved_direct_paths_are_regenerated(self):
+        with self.storage.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy",
+                    "logs.txt",
+                    "legacy.txt",
+                    "text/plain",
+                    4,
+                    1000.0,
+                    2000.0,
+                    "logs",
+                ),
+            )
+            conn.commit()
+
+        self.storage.backfill_direct_paths()
+
+        with self.storage.get_db() as conn:
+            row = conn.execute(
+                "SELECT direct_path FROM files WHERE id = ?", ("legacy",)
+            ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertNotEqual(row["direct_path"].lower(), "logs")
+        self.assertTrue(row["direct_path"].startswith("logs"))
 
     def test_s3_post_upload_flow(self):
         response = self.client.post(
