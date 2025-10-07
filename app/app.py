@@ -199,25 +199,43 @@ def _load_secret_key() -> str:
         return secrets.token_hex(32)
 
 
-SECRET_KEY_VALUE = _load_secret_key()
+_SECRET_KEY_VALUE: Optional[str] = None
 _api_key_serializer: Optional[URLSafeSerializer] = None
+
+
+def get_secret_key_value() -> str:
+    global _SECRET_KEY_VALUE
+    if _SECRET_KEY_VALUE is None:
+        _SECRET_KEY_VALUE = _load_secret_key()
+    return _SECRET_KEY_VALUE
 
 
 def _get_api_key_serializer() -> Optional[URLSafeSerializer]:
     global _api_key_serializer
     if _api_key_serializer is None:
         try:
-            _api_key_serializer = URLSafeSerializer(SECRET_KEY_VALUE, salt="api-key")
+            _api_key_serializer = URLSafeSerializer(
+                get_secret_key_value(), salt="api-key"
+            )
         except Exception:
             return None
     return _api_key_serializer
 
 
-def _encrypt_api_key(value: str) -> str:
+def _encrypt_api_key(value: str) -> Optional[str]:
     serializer = _get_api_key_serializer()
     if not serializer:
-        return ""
-    return serializer.dumps(value)
+        logging.getLogger("localhosting.security").warning(
+            "api_key_encryption_unavailable falling back to plaintext"
+        )
+        return None
+    try:
+        return serializer.dumps(value)
+    except Exception:
+        logging.getLogger("localhosting.security").exception(
+            "api_key_encryption_failed"
+        )
+        return None
 
 
 def _decrypt_api_key(token: str) -> Optional[str]:
@@ -541,11 +559,17 @@ def require_api_auth(response_format: str = "json"):
 
 def _generate_api_key_entry(label: str = "") -> dict:
     raw_key = secrets.token_urlsafe(32)
+    encrypted = _encrypt_api_key(raw_key)
+    if encrypted is None:
+        encrypted = ""
+        logging.getLogger("localhosting.security").warning(
+            "storing_api_key_without_encrypted_copy"
+        )
     return {
         "id": uuid.uuid4().hex,
         "key": raw_key,
         "key_hash": hash_api_key(raw_key),
-        "key_encrypted": _encrypt_api_key(raw_key),
+        "key_encrypted": encrypted,
         "label": (label or "").strip(),
         "created_at": time.time(),
     }
@@ -591,7 +615,7 @@ try:
 except ValueError:
     max_upload_size_mb = 500
 app.config["MAX_CONTENT_LENGTH"] = max(1, max_upload_size_mb) * 1024 * 1024
-app.config["SECRET_KEY"] = SECRET_KEY_VALUE
+app.config["SECRET_KEY"] = get_secret_key_value()
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 

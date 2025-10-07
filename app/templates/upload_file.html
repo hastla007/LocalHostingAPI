@@ -20,7 +20,7 @@
       action="{{ url_for('fileupload') }}"
       enctype="multipart/form-data"
       data-api-auth-enabled="{{ 'true' if api_auth_enabled else 'false' }}"
-      data-api-key="{{ api_ui_key.key if api_ui_key else '' }}"
+      data-api-key="{{ api_ui_key.key if api_ui_key and api_ui_key.has_plaintext else '' }}"
     >
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <div
