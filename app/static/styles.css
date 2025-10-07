@@ -199,7 +199,7 @@ main {
   padding: 0.5rem 0.9rem;
   border-radius: 6px;
   text-decoration: none;
-  background: #2563eb;
+  background: #4b5563;
   color: #fff;
   border: none;
   cursor: pointer;
@@ -219,7 +219,7 @@ main {
 }
 
 .button:hover {
-  background: #1d4ed8;
+  background: #374151;
 }
 
 .button.icon-only:hover,
@@ -247,29 +247,29 @@ main {
 }
 
 .button.primary {
-  background: #16a34a;
+  background: #f97316;
 }
 
 .button.primary:hover {
-  background: #15803d;
+  background: #ea580c;
 }
 
 .button.secondary {
-  background: #0ea5e9;
+  background: #6b7280;
 }
 
 .button.secondary.icon-only {
   background: none;
-  color: #0ea5e9;
+  color: #6b7280;
 }
 
 .button.secondary:hover {
-  background: #0284c7;
+  background: #4b5563;
 }
 
 .button.secondary.icon-only:hover,
 .button.secondary.icon-only:focus-visible {
-  background: rgba(14, 165, 233, 0.12);
+  background: rgba(107, 114, 128, 0.12);
 }
 
 .api-key-hint {
@@ -602,6 +602,11 @@ main {
 
 .settings-table td input[type="number"] {
   width: 100%;
+}
+
+.settings-table td input.half-width-input {
+  width: 50%;
+  min-width: 140px;
 }
 
 .form-actions {
