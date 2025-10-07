@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card auth-card">
+    <h2>Log in to LocalHostingAPI</h2>
+    <form method="post" class="form-grid login-form">
+      <label for="username">Username</label>
+      <input
+        type="text"
+        id="username"
+        name="username"
+        autocomplete="username"
+        value="{{ request.form.get('username', '') }}"
+        required
+      />
+
+      <label for="password">Password</label>
+      <input
+        type="password"
+        id="password"
+        name="password"
+        autocomplete="current-password"
+        required
+      />
+
+      <button type="submit" class="button primary">Log in</button>
+    </form>
+    <p class="form-help">
+      Use the credentials configured on the <a href="{{ url_for('settings') }}">settings page</a>. Authentication is optional and
+      disabled by default.
+    </p>
+  </section>
+{% endblock %}
