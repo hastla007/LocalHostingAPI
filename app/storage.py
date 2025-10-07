@@ -1,10 +1,14 @@
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
+from urllib.parse import quote
+
+from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -67,6 +71,20 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+RESERVED_DIRECT_PATHS = {
+    "hosting",
+    "settings",
+    "api-docs",
+    "download",
+    "fileupload",
+    "static",
+    "files",
+    "uploads",
+    "data",
+    "favicon.ico",
+}
+
+
 def init_db() -> None:
     with get_db() as conn:
         conn.execute(
@@ -78,10 +96,94 @@ def init_db() -> None:
                 content_type TEXT,
                 size INTEGER NOT NULL,
                 uploaded_at REAL NOT NULL,
-                expires_at REAL NOT NULL
+                expires_at REAL NOT NULL,
+                direct_path TEXT
             )
             """
         )
+        conn.commit()
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(files)")
+        }
+        if "direct_path" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN direct_path TEXT")
+            conn.commit()
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_direct_path ON files(direct_path)"
+        )
+        conn.commit()
+
+
+def _direct_path_in_use(conn: sqlite3.Connection, direct_path: str) -> bool:
+    if not direct_path:
+        return True
+    cursor = conn.execute(
+        "SELECT 1 FROM files WHERE direct_path = ? LIMIT 1", (direct_path,)
+    )
+    return cursor.fetchone() is not None
+
+
+def _generate_unique_direct_path(
+    conn: sqlite3.Connection,
+    original_name: str,
+    file_id: str,
+    taken_paths: Optional[Set[str]] = None,
+) -> str:
+    base_name = (original_name or f"file-{file_id}").strip()
+    base_name = base_name.replace("\\", "/")
+    base_name = os.path.basename(base_name)
+    sanitized = secure_filename(base_name)
+    if not sanitized:
+        sanitized = secure_filename(f"file-{file_id}")
+    if not sanitized:
+        sanitized = f"file-{file_id}"
+
+    name, ext = os.path.splitext(sanitized)
+    if not name:
+        name = sanitized or f"file-{file_id}"
+        sanitized = name
+
+    candidate = sanitized
+    counter = 1
+    while (
+        candidate.lower() in RESERVED_DIRECT_PATHS
+        or _direct_path_in_use(conn, candidate)
+        or (taken_paths is not None and candidate in taken_paths)
+    ):
+        suffix = f"-{counter}"
+        candidate = f"{name}{suffix}{ext}"
+        counter += 1
+    if taken_paths is not None:
+        taken_paths.add(candidate)
+    return candidate
+
+
+def backfill_direct_paths() -> None:
+    with get_db() as conn:
+        existing_cursor = conn.execute(
+            "SELECT direct_path FROM files WHERE direct_path IS NOT NULL"
+        )
+        taken_paths = {
+            row["direct_path"] for row in existing_cursor.fetchall() if row["direct_path"]
+        }
+        cursor = conn.execute(
+            "SELECT id, original_name, direct_path FROM files ORDER BY uploaded_at"
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            if row["direct_path"]:
+                continue
+            direct_path = _generate_unique_direct_path(
+                conn,
+                row["original_name"],
+                row["id"],
+                taken_paths,
+            )
+            conn.execute(
+                "UPDATE files SET direct_path = ? WHERE id = ?",
+                (direct_path, row["id"]),
+            )
         conn.commit()
 
 
@@ -127,21 +229,32 @@ def register_file(
     uploaded_at = time.time()
     expires_at = calculate_expiration(retention_hours)
     with get_db() as conn:
+        direct_path = _generate_unique_direct_path(conn, original_name, file_id)
         conn.execute(
             """
-            INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (file_id, original_name, stored_name, content_type, size, uploaded_at, expires_at),
+            (
+                file_id,
+                original_name,
+                stored_name,
+                content_type,
+                size,
+                uploaded_at,
+                expires_at,
+                direct_path,
+            ),
         )
         conn.commit()
     logger.info(
-        "upload_registered file_id=%s original_name=%s size=%d retention_hours=%.2f expires_at=%f",
+        "upload_registered file_id=%s original_name=%s size=%d retention_hours=%.2f expires_at=%f direct_path=%s",
         file_id,
         original_name,
         size,
         retention_hours,
         expires_at,
+        direct_path,
     )
     return file_id
 
@@ -218,10 +331,21 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             "expires_at": row["expires_at"],
             "remaining_seconds": remaining_seconds,
             "download_url": f"/download/{row['id']}",
+            "direct_download_url": f"/files/{row['id']}/{quote(row['original_name'])}",
+            "raw_download_path": row["direct_path"],
         }
+
+
+def get_file_by_direct_path(direct_path: str) -> Optional[sqlite3.Row]:
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM files WHERE direct_path = ?", (direct_path,)
+        )
+        return cursor.fetchone()
 
 
 logger = logging.getLogger("localhosting.storage")
 
 ensure_directories()
 init_db()
+backfill_direct_paths()

@@ -3,6 +3,7 @@ import os
 import time
 import uuid
 from datetime import datetime
+from secrets import compare_digest
 
 from flask import (
     Flask,
@@ -22,10 +23,12 @@ from .storage import (
     cleanup_expired_files,
     delete_file,
     get_file,
+    get_file_by_direct_path,
     iter_files,
     list_files,
     load_config,
     register_file,
+    RESERVED_DIRECT_PATHS,
     save_config,
 )
 
@@ -101,6 +104,15 @@ def index():
 def hosting():
     files = list(iter_files(list_files()))
     config = load_config()
+    for file in files:
+        file["download_url"] = url_for("download", file_id=file["id"])
+        file["direct_download_url"] = url_for(
+            "direct_download", file_id=file["id"], filename=file["original_name"]
+        )
+        if file.get("raw_download_path"):
+            file["raw_download_url"] = url_for(
+                "serve_raw_file", direct_path=file["raw_download_path"]
+            )
     return render_template("hosting.html", files=files, config=config)
 
 
@@ -248,11 +260,18 @@ def fileupload():
     if record:
         expires_at = record["expires_at"]
         uploaded_at = record["uploaded_at"]
+        raw_download_url = url_for(
+            "serve_raw_file", direct_path=record["direct_path"], _external=True
+        )
     else:
         expires_at = time.time()
         uploaded_at = expires_at
+        raw_download_url = ""
 
     download_url = url_for("download", file_id=file_id, _external=True)
+    direct_download_url = url_for(
+        "direct_download", file_id=file_id, filename=filename, _external=True
+    )
     lifecycle_logger.info(
         "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
         file_id,
@@ -271,6 +290,9 @@ def fileupload():
                 "uploaded_at": uploaded_at,
                 "expires_at": expires_at,
                 "expires_at_iso": datetime.fromtimestamp(expires_at).isoformat(),
+                "direct_download_url": direct_download_url,
+                "raw_download_url": raw_download_url,
+                "raw_download_path": record["direct_path"] if record else "",
                 "message": "File uploaded successfully.",
             }
         ),
@@ -293,6 +315,67 @@ def download(file_id: str):
         directory=str(UPLOADS_DIR),
         path=record["stored_name"],
         as_attachment=True,
+        download_name=record["original_name"],
+    )
+
+
+@app.route("/files/<file_id>/<path:filename>")
+def direct_download(file_id: str, filename: str):
+    record = get_file(file_id)
+    if not record:
+        lifecycle_logger.warning("file_direct_missing file_id=%s", file_id)
+        abort(404)
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
+        cleanup_expired_files()
+        abort(404)
+    if not compare_digest(filename, record["original_name"]):
+        lifecycle_logger.warning(
+            "file_direct_name_mismatch file_id=%s requested=%s stored=%s",
+            file_id,
+            filename,
+            record["original_name"],
+        )
+        abort(404)
+
+    lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
+    return send_from_directory(
+        directory=str(UPLOADS_DIR),
+        path=record["stored_name"],
+        as_attachment=True,
+        download_name=record["original_name"],
+    )
+
+
+@app.route("/<path:direct_path>")
+def serve_raw_file(direct_path: str):
+    normalized = direct_path.strip("/")
+    if not normalized:
+        abort(404)
+    first_segment = normalized.split("/", 1)[0]
+    if first_segment.lower() in RESERVED_DIRECT_PATHS:
+        abort(404)
+
+    record = get_file_by_direct_path(normalized)
+    if not record:
+        lifecycle_logger.warning("file_raw_missing direct_path=%s", normalized)
+        abort(404)
+    if record["expires_at"] < time.time():
+        lifecycle_logger.info(
+            "file_raw_blocked_expired file_id=%s direct_path=%s",
+            record["id"],
+            normalized,
+        )
+        cleanup_expired_files()
+        abort(404)
+
+    lifecycle_logger.info(
+        "file_raw_downloaded file_id=%s direct_path=%s", record["id"], normalized
+    )
+    return send_from_directory(
+        directory=str(UPLOADS_DIR),
+        path=record["stored_name"],
+        as_attachment=False,
         download_name=record["original_name"],
     )
 

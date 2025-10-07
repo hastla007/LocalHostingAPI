@@ -57,6 +57,20 @@
               <td class="time-remaining">{{ file.remaining_seconds|human_timedelta }}</td>
               <td>
                 <a href="{{ file.download_url }}" class="button">Download</a>
+                <a
+                  href="{{ file.direct_download_url }}"
+                  class="button secondary"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Direct Link</a>
+                {% if file.raw_download_url %}
+                  <a
+                    href="{{ file.raw_download_url }}"
+                    class="button secondary"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Raw URL</a>
+                {% endif %}
                 <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
                   <button type="submit" class="button danger">Delete</button>
                 </form>
@@ -90,7 +104,7 @@
         progressContainer.classList.add('hidden');
       };
 
-      const showStatus = (message, type = 'info', link) => {
+      const showStatus = (message, type = 'info', links = []) => {
         statusEl.textContent = '';
         statusEl.className = `status-message ${type}`;
         if (!message) {
@@ -99,15 +113,19 @@
         const span = document.createElement('span');
         span.textContent = message;
         statusEl.append(span);
-        if (link && link.href && link.text) {
+        const normalizedLinks = Array.isArray(links) ? links : links ? [links] : [];
+        normalizedLinks.forEach((link, index) => {
+          if (!link || !link.href || !link.text) {
+            return;
+          }
           const linkEl = document.createElement('a');
           linkEl.href = link.href;
           linkEl.textContent = link.text;
           linkEl.target = '_blank';
           linkEl.rel = 'noopener noreferrer';
-          statusEl.append(' ');
+          statusEl.append(index === 0 ? ' ' : ' | ');
           statusEl.append(linkEl);
-        }
+        });
       };
 
       form.addEventListener('submit', function (event) {
@@ -161,13 +179,20 @@
           if (xhr.status >= 200 && xhr.status < 300) {
             const filename = response.filename || 'File';
             const retention = response.retention_hours != null ? `Retained for ${response.retention_hours} hours.` : '';
-            const link = response.download_url
-              ? { href: response.download_url, text: 'Download' }
-              : null;
+            const links = [];
+            if (response.download_url) {
+              links.push({ href: response.download_url, text: 'Download' });
+            }
+            if (response.direct_download_url) {
+              links.push({ href: response.direct_download_url, text: 'Direct Link' });
+            }
+            if (response.raw_download_url) {
+              links.push({ href: response.raw_download_url, text: 'Raw URL' });
+            }
             const message = retention
               ? `Upload complete: ${filename}. ${retention}`
               : `Upload complete: ${filename}.`;
-            showStatus(message, 'success', link);
+            showStatus(message, 'success', links);
             progressBar.style.width = '100%';
             progressBar.setAttribute('aria-valuenow', '100');
             form.reset();

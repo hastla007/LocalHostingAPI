@@ -29,6 +29,9 @@
   "filename": "document.pdf",
   "size": 523980,
   "download_url": "{{ request.url_root.rstrip('/') }}/download/&lt;id&gt;",
+  "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf",
+  "raw_download_url": "{{ request.url_root.rstrip('/') }}/document.pdf",
+  "raw_download_path": "document.pdf",
   "retention_hours": {{ config.retention_hours }},
   "uploaded_at": 1717430587.706497,
   "expires_at": 1717516987.706497,
@@ -47,7 +50,19 @@
     <p><strong>Endpoint:</strong> <code>GET /download/&lt;id&gt;</code></p>
     <p>Use the <code>download_url</code> returned during upload or substitute the file ID:</p>
     <pre><code>curl -O {{ request.url_root.rstrip('/') }}/download/&lt;id&gt;</code></pre>
-    <p>Downloads honor the original filename. If a file has expired based on the current retention setting, the endpoint returns <code>404 Not Found</code>.</p>
+    <p>
+      A second direct endpoint preserves the original filename in the URL for easier sharing:
+      <code>GET /files/&lt;id&gt;/&lt;original_filename&gt;</code>.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf</code></pre>
+    <p>
+      New uploads also receive a raw filename URL that omits the ID entirely, ideal for inline playback or embedding:
+      <code>GET /&lt;original_filename&gt;</code>. If a filename is already in use, a numeric suffix (for example <code>report-1.pdf</code>) is appended to keep the paths unique.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/document.pdf</code></pre>
+    <p>
+      All endpoints honor the original filename and require the file to be unexpired; otherwise a <code>404 Not Found</code> is returned.
+    </p>
   </section>
 
   <section class="card">
