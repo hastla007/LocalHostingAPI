@@ -9,11 +9,12 @@ import time
 import uuid
 from copy import deepcopy
 from collections import deque
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from secrets import compare_digest
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 
@@ -36,15 +37,39 @@ from flask import (
     session,
     url_for,
 )
+from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
+try:
+    from flask_wtf.csrf import CSRFProtect, CSRFError
+    HAS_FLASK_WTF = True
+except ModuleNotFoundError:  # pragma: no cover - fallback for test environments
+    HAS_FLASK_WTF = False
+    class CSRFError(Exception):
+        """Fallback CSRF error used when Flask-WTF is unavailable."""
+
+
+    class CSRFProtect:  # type: ignore[override]
+        def __init__(self, app: Optional[Flask] = None) -> None:
+            if app is not None:
+                self.init_app(app)
+
+        def init_app(self, app: Flask) -> None:
+            app.logger.warning(
+                "Flask-WTF is not installed; CSRF protection is disabled."
+            )
+
+        def exempt(self, view: Callable) -> Callable:
+            return view
 
 from .storage import (
+    DATA_DIR,
     LOGS_DIR,
     RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
     delete_file,
     ensure_directories,
+    get_db,
     get_file,
     get_file_by_direct_path,
     get_storage_path,
@@ -55,6 +80,8 @@ from .storage import (
     register_file,
     save_config,
 )
+
+from threading import Semaphore
 
 RESERVED_ROUTE_ENDPOINTS = {
     "hosting": "hosting",
@@ -172,7 +199,7 @@ def _load_log_payload(source: dict, *, max_lines: int = MAX_LOG_LINES) -> dict:
             {
                 "size_bytes": stat.st_size,
                 "last_modified": stat.st_mtime,
-                "last_modified_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "last_modified_iso": isoformat_utc(stat.st_mtime),
             }
         )
 
@@ -199,7 +226,7 @@ def _build_log_response(source: dict) -> dict:
             "label": source["label"],
             "description": source["description"],
             "generated_at": generated_at,
-            "generated_at_iso": datetime.utcfromtimestamp(generated_at).isoformat() + "Z",
+            "generated_at_iso": isoformat_utc(generated_at),
             "max_lines": MAX_LOG_LINES,
         }
     )
@@ -362,10 +389,89 @@ class _FallbackCleanupScheduler:
                 self._logger.exception("Cleanup job failed")
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "localhostingapi-secret")
+
+try:
+    max_upload_size_mb = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500"))
+except ValueError:
+    max_upload_size_mb = 500
+app.config["MAX_CONTENT_LENGTH"] = max(1, max_upload_size_mb) * 1024 * 1024
+
+secret_key = os.environ.get("SECRET_KEY")
+if not secret_key:
+    secret_path = DATA_DIR / ".secret_key"
+    try:
+        if secret_path.exists():
+            secret_key = secret_path.read_text(encoding="utf-8").strip()
+        else:
+            ensure_directories()
+            secret_key = secrets.token_hex(32)
+            secret_path.write_text(secret_key, encoding="utf-8")
+            try:
+                secret_path.chmod(0o600)
+            except OSError:
+                logging.getLogger("localhosting.config").warning(
+                    "Unable to set secret key permissions for %s", secret_path
+                )
+            logging.warning("Generated new secret key - stored in %s", secret_path)
+    except OSError as error:
+        logging.getLogger("localhosting.config").warning(
+            "Falling back to in-memory secret key: %s", error
+        )
+        secret_key = secrets.token_hex(32)
+
+app.config["SECRET_KEY"] = secret_key
+csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 
 lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+
+if not HAS_FLASK_WTF:
+
+    @app.context_processor
+    def _inject_csrf_stub():  # pragma: no cover - used when Flask-WTF missing
+        return {"csrf_token": lambda: ""}
+
+try:
+    max_concurrent_uploads = max(
+        1, int(os.environ.get("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", "10"))
+    )
+except ValueError:
+    max_concurrent_uploads = 10
+
+upload_semaphore = Semaphore(max_concurrent_uploads)
+
+
+@contextmanager
+def upload_slot() -> Iterator[bool]:
+    acquired = upload_semaphore.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            upload_semaphore.release()
+
+
+@app.errorhandler(413)
+def handle_file_too_large(error):  # pragma: no cover - framework hook
+    message = {"error": "File too large"}
+    api_paths = ("/fileupload", "/s3/", "/2.0/")
+    if request.path.startswith(api_paths) or (
+        request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html
+    ):
+        return jsonify(message), 413
+    if request.accept_mimetypes.accept_html:
+        flash("The uploaded file exceeds the allowed size limit.", "error")
+        return redirect(request.referrer or url_for("upload_file_page")), 303
+    return jsonify(message), 413
+
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(error):  # pragma: no cover - framework hook
+    description = getattr(error, "description", "Invalid CSRF token")
+    if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+        return jsonify({"error": description}), 400
+    flash("Your session has expired or the form was invalid. Please try again.", "error")
+    return redirect(request.referrer or url_for("login")), 303
 
 
 @app.context_processor
@@ -378,6 +484,23 @@ def inject_ui_state():
         "api_auth_enabled": bool(config.get("api_auth_enabled")),
         "api_ui_key_id": config.get("api_ui_key_id", ""),
     }
+
+
+def isoformat_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def remove_orphaned_record(file_id: str) -> None:
+    try:
+        with get_db() as conn:
+            conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            conn.commit()
+    except Exception as error:  # pragma: no cover - defensive logging
+        lifecycle_logger.warning(
+            "orphan_record_cleanup_failed file_id=%s error=%s", file_id, error
+        )
 
 # Schedule periodic cleanup so requests are not blocked by retention pruning.
 try:
@@ -529,13 +652,14 @@ def _build_s3_put_success(bucket: str, key: str, location: str, etag: str):
 
 @app.context_processor
 def inject_utilities():
-    return {"now": datetime.now, "current_year": datetime.now().year}
+    now_utc = datetime.now(tz=timezone.utc)
+    return {"now": lambda: datetime.now(tz=timezone.utc), "current_year": now_utc.year}
 
 
 @app.template_filter("human_datetime")
 def human_datetime(value: float) -> str:
-    dt = datetime.fromtimestamp(value)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    dt = datetime.fromtimestamp(value, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 @app.template_filter("human_filesize")
@@ -872,162 +996,206 @@ def logout():
     return redirect(url_for("hosting"))
 
 
+@csrf.exempt
 @app.route("/fileupload", methods=["POST"])
 @require_api_auth()
 def fileupload():
-    if "file" not in request.files:
-        app.logger.warning("upload_failed reason=no_file_part")
-        return jsonify({"error": "No file part"}), 400
+    with upload_slot() as acquired:
+        if not acquired:
+            return jsonify({"error": "Too many concurrent uploads"}), 503
 
-    uploads = request.files.getlist("file")
-    valid_uploads = []
-    for upload in uploads:
-        if not upload or upload.filename == "":
-            continue
-        filename = secure_filename(upload.filename)
-        if not filename:
-            app.logger.warning(
-                "upload_failed reason=invalid_filename original=%s", upload.filename
-            )
-            return jsonify({"error": "Invalid filename"}), 400
-        valid_uploads.append((upload, filename))
+        if "file" not in request.files:
+            app.logger.warning("upload_failed reason=no_file_part")
+            return jsonify({"error": "No file part"}), 400
 
-    if not valid_uploads:
-        app.logger.warning("upload_failed reason=no_file_selected")
-        return jsonify({"error": "No file selected"}), 400
+        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+        if max_bytes and request.content_length and request.content_length > max_bytes:
+            return jsonify({"error": "File too large"}), 413
 
-    config = get_config()
-    payload = request.get_json(silent=True) if request.is_json else None
-    try:
-        retention_hours = resolve_retention(
-            config,
-            request.form.get("retention_hours"),
-            request.args.get("retention_hours"),
-            (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
-        )
-    except RetentionValidationError as error:
-        allowed_range = error.allowed_range or [
-            config["retention_min_hours"],
-            config["retention_max_hours"],
-        ]
-        app.logger.warning(
-            "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
-            request.form.get("retention_hours")
-            or request.args.get("retention_hours")
-            or (payload or {}).get("retention_hours"),
-            allowed_range[0],
-            allowed_range[1],
-        )
-        return jsonify(error.to_payload()), 400
+        uploads = request.files.getlist("file")
+        size_failures: List[Dict[str, str]] = []
+        valid_uploads = []
+        for upload in uploads:
+            if not isinstance(upload, FileStorage) or not upload or upload.filename == "":
+                continue
+            filename = secure_filename(upload.filename)
+            if not filename:
+                app.logger.warning(
+                    "upload_failed reason=invalid_filename original=%s", upload.filename
+                )
+                return jsonify({"error": "Invalid filename"}), 400
+            if max_bytes and upload.content_length and upload.content_length > max_bytes:
+                size_failures.append(
+                    {
+                        "filename": filename,
+                        "reason": "too_large",
+                    }
+                )
+                continue
+            valid_uploads.append((upload, filename))
 
-    results = []
-    failures: List[Dict[str, str]] = []
-    for upload, filename in valid_uploads:
-        upload_path = None
-        file_id = str(uuid.uuid4())
-        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        if not valid_uploads:
+            if size_failures:
+                return jsonify(
+                    {"message": "Failed to upload files.", "errors": size_failures}
+                ), 413
+            app.logger.warning("upload_failed reason=no_file_selected")
+            return jsonify({"error": "No file selected"}), 400
+
+        config = get_config()
+        payload = request.get_json(silent=True) if request.is_json else None
         try:
-            upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-            upload.save(str(upload_path))
-            size = upload_path.stat().st_size
+            retention_hours = resolve_retention(
+                config,
+                request.form.get("retention_hours"),
+                request.args.get("retention_hours"),
+                (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
+            )
+        except RetentionValidationError as error:
+            allowed_range = error.allowed_range or [
+                config["retention_min_hours"],
+                config["retention_max_hours"],
+            ]
+            app.logger.warning(
+                "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
+                request.form.get("retention_hours")
+                or request.args.get("retention_hours")
+                or (payload or {}).get("retention_hours"),
+                allowed_range[0],
+                allowed_range[1],
+            )
+            return jsonify(error.to_payload()), 400
 
-            file_id = register_file(
-                original_name=filename,
-                stored_name=stored_name,
-                content_type=upload.content_type,
-                size=size,
-                retention_hours=retention_hours,
-                file_id=file_id,
+        results = []
+        failures: List[Dict[str, str]] = list(size_failures)
+        for upload, filename in valid_uploads:
+            upload_path = None
+            temp_path = None
+            file_id = str(uuid.uuid4())
+            stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+            try:
+                upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+                temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
+                if hasattr(upload.stream, "seek"):
+                    try:
+                        upload.stream.seek(0)
+                    except (OSError, IOError):
+                        pass
+                upload.save(str(temp_path))
+                temp_path.replace(upload_path)
+                size = upload_path.stat().st_size
+                if max_bytes and size > max_bytes:
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                    failures.append(
+                        {
+                            "filename": filename,
+                            "reason": "too_large",
+                        }
+                    )
+                    continue
+
+                file_id = register_file(
+                    original_name=filename,
+                    stored_name=stored_name,
+                    content_type=upload.content_type,
+                    size=size,
+                    retention_hours=retention_hours,
+                    file_id=file_id,
+                )
+            except Exception as error:
+                lifecycle_logger.exception(
+                    "file_upload_failed file_id=%s filename=%s", file_id, filename
+                )
+                if temp_path and temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path and upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                failures.append(
+                    {
+                        "filename": filename,
+                        "reason": "internal_error",
+                        "detail": str(error),
+                    }
+                )
+                continue
+
+            record = get_file(file_id)
+            if not record:
+                lifecycle_logger.error(
+                    "file_registration_failed file_id=%s filename=%s", file_id, filename
+                )
+                if upload_path and upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                remove_orphaned_record(file_id)
+                failures.append(
+                    {
+                        "filename": filename,
+                        "reason": "registration_failed",
+                    }
+                )
+                continue
+
+            expires_at = record["expires_at"]
+            uploaded_at = record["uploaded_at"]
+            raw_download_url = (
+                url_for("serve_raw_file", direct_path=record["direct_path"], _external=True)
+                if record["direct_path"]
+                else ""
             )
-        except Exception as error:
-            lifecycle_logger.exception(
-                "file_upload_failed file_id=%s filename=%s", file_id, filename
+
+            download_url = url_for("download", file_id=file_id, _external=True)
+            direct_download_url = url_for(
+                "direct_download", file_id=file_id, filename=filename, _external=True
             )
-            if upload_path and upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            failures.append(
+            lifecycle_logger.info(
+                "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
+                file_id,
+                filename,
+                size,
+                retention_hours,
+            )
+            results.append(
                 {
+                    "id": file_id,
                     "filename": filename,
-                    "reason": "internal_error",
-                    "detail": str(error),
+                    "size": size,
+                    "download_url": download_url,
+                    "retention_hours": retention_hours,
+                    "uploaded_at": uploaded_at,
+                    "expires_at": expires_at,
+                    "expires_at_iso": isoformat_utc(expires_at),
+                    "direct_download_url": direct_download_url,
+                    "raw_download_url": raw_download_url,
+                    "raw_download_path": record["direct_path"],
+                    "message": "File uploaded successfully.",
                 }
             )
-            continue
 
-        record = get_file(file_id)
-        if not record:
-            lifecycle_logger.error(
-                "file_registration_failed file_id=%s filename=%s", file_id, filename
-            )
-            if upload_path and upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            failures.append(
-                {
-                    "filename": filename,
-                    "reason": "registration_failed",
-                }
-            )
-            continue
-
-        expires_at = record["expires_at"]
-        uploaded_at = record["uploaded_at"]
-        raw_download_url = (
-            url_for("serve_raw_file", direct_path=record["direct_path"], _external=True)
-            if record["direct_path"]
-            else ""
-        )
-
-        download_url = url_for("download", file_id=file_id, _external=True)
-        direct_download_url = url_for(
-            "direct_download", file_id=file_id, filename=filename, _external=True
-        )
-        lifecycle_logger.info(
-            "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
-            file_id,
-            filename,
-            size,
-            retention_hours,
-        )
-        results.append(
-            {
-                "id": file_id,
-                "filename": filename,
-                "size": size,
-                "download_url": download_url,
-                "retention_hours": retention_hours,
-                "uploaded_at": uploaded_at,
-                "expires_at": expires_at,
-                "expires_at_iso": datetime.fromtimestamp(expires_at).isoformat(),
-                "direct_download_url": direct_download_url,
-                "raw_download_url": raw_download_url,
-                "raw_download_path": record["direct_path"],
-                "message": "File uploaded successfully.",
+        if not results:
+            status = 413 if any(entry.get("reason") == "too_large" for entry in failures) else 500
+            message = {
+                "message": "Failed to upload files.",
+                "errors": failures,
             }
-        )
+            return jsonify(message), status
 
-    if not results:
-        message = {
-            "message": "Failed to upload files.",
-            "errors": failures,
+        if len(results) == 1 and not failures:
+            return jsonify(results[0]), 201
+
+        response_payload: Dict[str, object] = {
+            "message": f"Uploaded {len(results)} files successfully.",
+            "files": results,
+            "retention_hours": retention_hours,
         }
-        return jsonify(message), 500
-
-    if len(results) == 1 and not failures:
-        return jsonify(results[0]), 201
-
-    response_payload: Dict[str, object] = {
-        "message": f"Uploaded {len(results)} files successfully.",
-        "files": results,
-        "retention_hours": retention_hours,
-    }
-    if failures:
-        response_payload["message"] = (
-            f"Uploaded {len(results)} files successfully; {len(failures)} failed."
-        )
-        response_payload["failed_files"] = failures
-    return jsonify(response_payload), 201
+        if failures:
+            response_payload["message"] = (
+                f"Uploaded {len(results)} files successfully; {len(failures)} failed."
+            )
+            response_payload["failed_files"] = failures
+        return jsonify(response_payload), 201
 
 
 @app.route("/download/<file_id>")
@@ -1047,11 +1215,17 @@ def download(file_id: str):
             "file_download_missing_path file_id=%s stored_name=%s", file_id, record["stored_name"]
         )
         abort(404)
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=record["original_name"],
-    )
+    try:
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=record["original_name"],
+        )
+    except FileNotFoundError:
+        lifecycle_logger.warning(
+            "file_download_missing_race file_id=%s stored_name=%s", file_id, record["stored_name"]
+        )
+        abort(404)
 
 
 @app.route("/files/<file_id>/<path:filename>")
@@ -1082,196 +1256,255 @@ def direct_download(file_id: str, filename: str):
             record["stored_name"],
         )
         abort(404)
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=record["original_name"],
-    )
+    try:
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=record["original_name"],
+        )
+    except FileNotFoundError:
+        lifecycle_logger.warning(
+            "file_direct_missing_race file_id=%s stored_name=%s",
+            file_id,
+            record["stored_name"],
+        )
+        abort(404)
 
 
+@csrf.exempt
 @app.route("/2.0/files/content", methods=["POST"])
 @require_api_auth("box")
 def box_upload_files():
-    config = get_config()
-    uploads = request.files.getlist("file")
-    if not uploads:
-        lifecycle_logger.warning("box_upload_failed reason=no_file_part")
-        return _box_error("no_file", "No file part found in the request.")
-
-    attributes_raw = request.form.get("attributes")
-    attributes: Dict[str, object] = {}
-    if attributes_raw:
-        try:
-            attributes = json.loads(attributes_raw)
-        except json.JSONDecodeError:
-            lifecycle_logger.warning("box_upload_failed reason=invalid_attributes")
+    with upload_slot() as acquired:
+        if not acquired:
             return _box_error(
-                "invalid_attributes",
-                "The provided attributes payload could not be parsed as JSON.",
+                "service_busy", "Too many concurrent uploads. Try again shortly.", status=503
             )
 
-    retention_candidates = (
-        request.headers.get("X-Localhosting-Retention-Hours"),
-        request.form.get("retention_hours"),
-        request.args.get("retention_hours"),
-        (
-            str(attributes.get("retention_hours"))
-            if isinstance(attributes, dict)
-            and attributes.get("retention_hours") is not None
-            else None
-        ),
-    )
+        config = get_config()
+        uploads = request.files.getlist("file")
+        if not uploads:
+            lifecycle_logger.warning("box_upload_failed reason=no_file_part")
+            return _box_error("no_file", "No file part found in the request.")
 
-    try:
-        retention_hours = resolve_retention(config, *retention_candidates)
-    except RetentionValidationError as error:
-        allowed_range = error.allowed_range or [
-            config["retention_min_hours"],
-            config["retention_max_hours"],
-        ]
-        lifecycle_logger.warning(
-            "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
-            allowed_range[0],
-            allowed_range[1],
+        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+        if max_bytes and request.content_length and request.content_length > max_bytes:
+            return _box_error(
+                "file_too_large",
+                "The uploaded file exceeds the allowed size.",
+                status=413,
+            )
+
+        attributes_raw = request.form.get("attributes")
+        attributes: Dict[str, object] = {}
+        if attributes_raw:
+            try:
+                attributes = json.loads(attributes_raw)
+            except json.JSONDecodeError:
+                lifecycle_logger.warning("box_upload_failed reason=invalid_attributes")
+                return _box_error(
+                    "invalid_attributes",
+                    "The provided attributes payload could not be parsed as JSON.",
+                )
+
+        retention_candidates = (
+            request.headers.get("X-Localhosting-Retention-Hours"),
+            request.form.get("retention_hours"),
+            request.args.get("retention_hours"),
+            (
+                str(attributes.get("retention_hours"))
+                if isinstance(attributes, dict)
+                and attributes.get("retention_hours") is not None
+                else None
+            ),
         )
-        context = {
-            "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
-        }
-        return _box_error("retention_invalid", str(error), context=context)
-
-    entries = []
-    for upload in uploads:
-        if not upload or upload.filename == "":
-            continue
-
-        requested_name = None
-        if isinstance(attributes, dict):
-            requested_name = attributes.get("name")
-
-        original_name = requested_name or upload.filename or f"upload-{uuid.uuid4().hex}"
-        filename = secure_filename(original_name)
-        if not filename:
-            filename = (
-                secure_filename(upload.filename or "upload")
-                or f"upload-{uuid.uuid4().hex}"
-            )
-
-        file_id = str(uuid.uuid4())
-        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-
-        hash_sha1 = hashlib.sha1()
-        if hasattr(upload.stream, "seek"):
-            upload.stream.seek(0)
 
         try:
-            with upload_path.open("wb") as destination:
-                while True:
-                    chunk = upload.stream.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    destination.write(chunk)
-                    hash_sha1.update(chunk)
-
-            size = upload_path.stat().st_size
-            content_type = upload.content_type
-
-            file_id = register_file(
-                original_name=filename,
-                stored_name=stored_name,
-                content_type=content_type,
-                size=size,
-                retention_hours=retention_hours,
-                file_id=file_id,
+            retention_hours = resolve_retention(config, *retention_candidates)
+        except RetentionValidationError as error:
+            allowed_range = error.allowed_range or [
+                config["retention_min_hours"],
+                config["retention_max_hours"],
+            ]
+            lifecycle_logger.warning(
+                "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
+                allowed_range[0],
+                allowed_range[1],
             )
-        except Exception as error:
-            lifecycle_logger.exception(
-                "box_upload_failed reason=internal_error filename=%s", filename
+            context = {
+                "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
+            }
+            return _box_error("retention_invalid", str(error), context=context)
+
+        entries = []
+        for upload in uploads:
+            if (
+                not isinstance(upload, FileStorage)
+                or not upload
+                or upload.filename == ""
+            ):
+                continue
+
+            if max_bytes and upload.content_length and upload.content_length > max_bytes:
+                return _box_error(
+                    "file_too_large",
+                    "The uploaded file exceeds the allowed size.",
+                    status=413,
+                )
+
+            requested_name = None
+            if isinstance(attributes, dict):
+                requested_name = attributes.get("name")
+
+            original_name = requested_name or upload.filename or f"upload-{uuid.uuid4().hex}"
+            filename = secure_filename(original_name)
+            if not filename:
+                filename = (
+                    secure_filename(upload.filename or "upload")
+                    or f"upload-{uuid.uuid4().hex}"
+                )
+
+            file_id = str(uuid.uuid4())
+            stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+            upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+            temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
+
+            hash_sha1 = hashlib.sha1()
+            written = 0
+            if hasattr(upload.stream, "seek"):
+                try:
+                    upload.stream.seek(0)
+                except (OSError, IOError):
+                    pass
+
+            try:
+                with temp_path.open("wb") as destination:
+                    while True:
+                        chunk = upload.stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        hash_sha1.update(chunk)
+                        written += len(chunk)
+                        if max_bytes and written > max_bytes:
+                            raise ValueError("file too large")
+
+                temp_path.replace(upload_path)
+                size = written if written else upload_path.stat().st_size
+                if max_bytes and size > max_bytes:
+                    raise ValueError("file too large")
+                content_type = upload.content_type
+
+                file_id = register_file(
+                    original_name=filename,
+                    stored_name=stored_name,
+                    content_type=content_type,
+                    size=size,
+                    retention_hours=retention_hours,
+                    file_id=file_id,
+                )
+            except ValueError:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                return _box_error(
+                    "file_too_large",
+                    "The uploaded file exceeds the allowed size.",
+                    status=413,
+                )
+            except Exception as error:
+                lifecycle_logger.exception(
+                    "box_upload_failed reason=internal_error filename=%s", filename
+                )
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                return _box_error(
+                    "internal_error",
+                    "Failed to store uploaded file.",
+                    status=500,
+                )
+
+            record = get_file(file_id)
+            if not record:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                remove_orphaned_record(file_id)
+                lifecycle_logger.error(
+                    "box_upload_failed reason=registration_missing file_id=%s", file_id
+                )
+                return _box_error(
+                    "internal_error",
+                    f"Failed to register file {original_name}",
+                    status=500,
+                )
+
+            download_url = url_for("download", file_id=file_id, _external=True)
+            direct_download_url = url_for(
+                "direct_download", file_id=file_id, filename=record["original_name"], _external=True
             )
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            return _box_error(
-                "internal_error",
-                "Failed to store uploaded file.",
-                status=500,
+            raw_path_value = record["direct_path"] if record["direct_path"] else None
+            raw_download_url = (
+                url_for("serve_raw_file", direct_path=raw_path_value, _external=True)
+                if raw_path_value
+                else None
             )
 
-        record = get_file(file_id)
-        if not record:
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.error(
-                "box_upload_failed reason=registration_missing file_id=%s", file_id
-            )
-            return _box_error(
-                "internal_error",
-                f"Failed to register file {original_name}",
-                status=500,
-            )
-
-        download_url = url_for("download", file_id=file_id, _external=True)
-        direct_download_url = url_for(
-            "direct_download", file_id=file_id, filename=record["original_name"], _external=True
-        )
-        raw_path_value = record["direct_path"] if record["direct_path"] else None
-        raw_download_url = (
-            url_for("serve_raw_file", direct_path=raw_path_value, _external=True)
-            if raw_path_value
-            else None
-        )
-
-        iso_timestamp = datetime.fromtimestamp(record["uploaded_at"]).isoformat()
-        entry = {
-            "type": "file",
-            "id": file_id,
-            "name": record["original_name"],
-            "size": size,
-            "sha1": hash_sha1.hexdigest(),
-            "etag": file_id,
-            "sequence_id": "0",
-            "created_at": iso_timestamp,
-            "modified_at": iso_timestamp,
-            "content_modified_at": iso_timestamp,
-            "file_version": {
-                "type": "file_version",
-                "id": f"{file_id}_v1",
+            iso_timestamp = isoformat_utc(record["uploaded_at"])
+            entry = {
+                "type": "file",
+                "id": file_id,
+                "name": record["original_name"],
+                "size": size,
                 "sha1": hash_sha1.hexdigest(),
-            },
-            "path_collection": {
-                "total_count": 1,
-                "entries": [
-                    {
-                        "type": "folder",
-                        "id": "0",
-                        "name": "Uploads",
-                    }
-                ],
-            },
-            "shared_link": {
-                "download_url": download_url,
-                "direct_download_url": direct_download_url,
-                "raw_download_url": raw_download_url,
-            },
-            "expires_at": record["expires_at"],
-            "expires_at_iso": datetime.fromtimestamp(record["expires_at"]).isoformat(),
-        }
-        entries.append(entry)
-        lifecycle_logger.info(
-            "file_uploaded_box file_id=%s filename=%s size=%d retention_hours=%.2f",
-            file_id,
-            record["original_name"],
-            size,
-            retention_hours,
-        )
+                "etag": file_id,
+                "sequence_id": "0",
+                "created_at": iso_timestamp,
+                "modified_at": iso_timestamp,
+                "content_modified_at": iso_timestamp,
+                "file_version": {
+                    "type": "file_version",
+                    "id": f"{file_id}_v1",
+                    "sha1": hash_sha1.hexdigest(),
+                },
+                "path_collection": {
+                    "total_count": 1,
+                    "entries": [
+                        {
+                            "type": "folder",
+                            "id": "0",
+                            "name": "Uploads",
+                        }
+                    ],
+                },
+                "shared_link": {
+                    "download_url": download_url,
+                    "direct_download_url": direct_download_url,
+                    "raw_download_url": raw_download_url,
+                },
+                "expires_at": record["expires_at"],
+                "expires_at_iso": isoformat_utc(record["expires_at"]),
+            }
+            entries.append(entry)
+            lifecycle_logger.info(
+                "file_uploaded_box file_id=%s filename=%s size=%d retention_hours=%.2f",
+                file_id,
+                record["original_name"],
+                size,
+                retention_hours,
+            )
 
-    if not entries:
-        return _box_error("no_valid_files", "No valid files were provided.")
+        if not entries:
+            return _box_error("no_valid_files", "No valid files were provided.")
 
-    response = jsonify({"entries": entries, "total_count": len(entries)})
-    response.status_code = 201
-    return response
+        response = jsonify({"entries": entries, "total_count": len(entries)})
+        response.status_code = 201
+        return response
 
 
 @app.route("/2.0/files/<file_id>/content", methods=["GET"])
@@ -1298,12 +1531,18 @@ def box_download_file(file_id: str):
 
     lifecycle_logger.info("file_downloaded_box file_id=%s", file_id)
     mimetype = record["content_type"]
-    return send_file(
-        file_path,
-        as_attachment=True,
-        download_name=record["original_name"],
-        mimetype=mimetype or None,
-    )
+    try:
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=record["original_name"],
+            mimetype=mimetype or None,
+        )
+    except FileNotFoundError:
+        lifecycle_logger.warning(
+            "box_download_missing_race file_id=%s stored_name=%s", file_id, record["stored_name"]
+        )
+        return _box_error("not_found", "File not found.", status=404)
 
 
 @app.route("/2.0/file_requests/<file_id>", methods=["GET"])
@@ -1335,9 +1574,9 @@ def box_file_request(file_id: str):
         },
         "url": download_url,
         "upload_url": upload_url,
-        "created_at": datetime.fromtimestamp(record["uploaded_at"]).isoformat(),
-        "updated_at": datetime.fromtimestamp(record["uploaded_at"]).isoformat(),
-        "expires_at": datetime.fromtimestamp(record["expires_at"]).isoformat(),
+        "created_at": isoformat_utc(record["uploaded_at"]),
+        "updated_at": isoformat_utc(record["uploaded_at"]),
+        "expires_at": isoformat_utc(record["expires_at"]),
     }
     lifecycle_logger.info("box_file_request_retrieved file_id=%s", file_id)
     return jsonify(response_payload)
@@ -1349,7 +1588,7 @@ def serve_raw_file(direct_path: str):
     if not normalized:
         abort(404)
 
-    if ".." in normalized or normalized.startswith("/"):
+    if ".." in normalized:
         abort(404)
 
     first_segment = normalized.split("/", 1)[0]
@@ -1389,138 +1628,204 @@ def serve_raw_file(direct_path: str):
             "file_raw_missing_path file_id=%s stored_name=%s", record["id"], record["stored_name"]
         )
         abort(404)
-    return send_file(
-        file_path,
-        as_attachment=False,
-        download_name=record["original_name"],
-    )
+    try:
+        return send_file(
+            file_path,
+            as_attachment=False,
+            download_name=record["original_name"],
+        )
+    except FileNotFoundError:
+        lifecycle_logger.warning(
+            "file_raw_missing_race file_id=%s stored_name=%s",
+            record["id"],
+            record["stored_name"],
+        )
+        abort(404)
 
 
+@csrf.exempt
 @app.route("/s3/<bucket>", methods=["POST"])
 @require_api_auth("s3")
 def s3_multipart_upload(bucket: str):
-    config = get_config()
-    upload = request.files.get("file")
-    if upload is None:
-        return _s3_error_response(
-            "InvalidArgument",
-            "Missing file field 'file'.",
-            bucket=bucket,
+    with upload_slot() as acquired:
+        if not acquired:
+            return _s3_error_response(
+                "ServiceUnavailable",
+                "Too many concurrent uploads.",
+                bucket=bucket,
+                status_code=503,
+            )
+
+        config = get_config()
+        upload = request.files.get("file")
+        if not isinstance(upload, FileStorage):
+            return _s3_error_response(
+                "InvalidArgument",
+                "Missing file field 'file'.",
+                bucket=bucket,
+            )
+
+        if upload.filename is None:
+            return _s3_error_response(
+                "InvalidArgument",
+                "Missing filename for uploaded file.",
+                bucket=bucket,
+            )
+
+        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+        if max_bytes and request.content_length and request.content_length > max_bytes:
+            return _s3_error_response(
+                "EntityTooLarge",
+                "The uploaded file exceeds the allowed size.",
+                bucket=bucket,
+                status_code=413,
+            )
+
+        key = (
+            request.form.get("key")
+            or request.form.get("Key")
+            or upload.filename
+            or f"upload-{uuid.uuid4().hex}"
         )
+        if "${filename}" in key and upload.filename:
+            key = key.replace("${filename}", upload.filename)
 
-    key = (
-        request.form.get("key")
-        or request.form.get("Key")
-        or upload.filename
-        or f"upload-{uuid.uuid4().hex}"
-    )
-    if "${filename}" in key and upload.filename:
-        key = key.replace("${filename}", upload.filename)
+        original_name = (
+            request.form.get("x-amz-meta-original-filename")
+            or request.form.get("X-Amz-Meta-Original-Filename")
+            or os.path.basename(key)
+            or upload.filename
+            or f"upload-{uuid.uuid4().hex}"
+        )
+        filename = secure_filename(original_name)
+        if not filename:
+            filename = (
+                secure_filename(upload.filename or "upload")
+                or f"upload-{uuid.uuid4().hex}"
+            )
 
-    original_name = (
-        request.form.get("x-amz-meta-original-filename")
-        or request.form.get("X-Amz-Meta-Original-Filename")
-        or os.path.basename(key)
-        or upload.filename
-        or f"upload-{uuid.uuid4().hex}"
-    )
-    filename = secure_filename(original_name)
-    if not filename:
-        filename = secure_filename(upload.filename or "upload") or f"upload-{uuid.uuid4().hex}"
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+        temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
 
-    file_id = str(uuid.uuid4())
-    stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-    upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-
-    hash_md5 = hashlib.md5()
-    try:
+        hash_md5 = hashlib.md5()
+        written = 0
         if hasattr(upload.stream, "seek"):
-            upload.stream.seek(0)
-        with upload_path.open("wb") as destination:
-            while True:
-                chunk = upload.stream.read(1024 * 1024)
-                if not chunk:
-                    break
-                destination.write(chunk)
-                hash_md5.update(chunk)
-    except Exception as error:
-        lifecycle_logger.exception(
-            "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
-        )
-        if upload_path.exists():
+            try:
+                upload.stream.seek(0)
+            except (OSError, IOError):
+                pass
+
+        try:
+            with temp_path.open("wb") as destination:
+                while True:
+                    chunk = upload.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    hash_md5.update(chunk)
+                    written += len(chunk)
+                    if max_bytes and written > max_bytes:
+                        raise ValueError("file too large")
+
+            temp_path.replace(upload_path)
+            size = written if written else upload_path.stat().st_size
+            if max_bytes and size > max_bytes:
+                raise ValueError("file too large")
+        except ValueError:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "EntityTooLarge",
+                "The uploaded file exceeds the allowed size.",
+                bucket=bucket,
+                key=key,
+                status_code=413,
+            )
+        except Exception as error:
+            lifecycle_logger.exception(
+                "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+            )
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "InternalError",
+                "Failed to store uploaded file.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
+
+        try:
+            retention_hours = resolve_retention(
+                config,
+                request.form.get("x-amz-meta-retention-hours"),
+                request.headers.get("x-amz-meta-retention-hours"),
+                request.args.get("retentionHours"),
+            )
+        except RetentionValidationError as error:
             upload_path.unlink(missing_ok=True)
             prune_empty_upload_dirs(upload_path.parent)
-        return _s3_error_response(
-            "InternalError",
-            "Failed to store uploaded file.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
-        )
+            lifecycle_logger.warning(
+                "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+            )
+            return _s3_error_response(
+                "InvalidRequest",
+                str(error),
+                bucket=bucket,
+                key=key,
+            )
 
-    try:
-        retention_hours = resolve_retention(
-            config,
-            request.form.get("x-amz-meta-retention-hours"),
-            request.headers.get("x-amz-meta-retention-hours"),
-            request.args.get("retentionHours"),
-        )
-    except RetentionValidationError as error:
-        upload_path.unlink(missing_ok=True)
-        prune_empty_upload_dirs(upload_path.parent)
-        lifecycle_logger.warning(
-            "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
-        )
-        return _s3_error_response(
-            "InvalidRequest",
-            str(error),
-            bucket=bucket,
-            key=key,
-        )
+        try:
+            file_id = register_file(
+                original_name=filename,
+                stored_name=stored_name,
+                content_type=upload.content_type,
+                size=size,
+                retention_hours=retention_hours,
+                file_id=file_id,
+            )
+        except Exception:
+            lifecycle_logger.exception(
+                "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+            )
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "InternalError",
+                "Failed to register uploaded file.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
 
-    size = upload_path.stat().st_size
-    try:
-        file_id = register_file(
-            original_name=filename,
-            stored_name=stored_name,
-            content_type=upload.content_type,
-            size=size,
-            retention_hours=retention_hours,
-            file_id=file_id,
-        )
-    except Exception:
-        lifecycle_logger.exception(
-            "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
-        )
-        if upload_path.exists():
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-        return _s3_error_response(
-            "InternalError",
-            "Failed to register uploaded file.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
-        )
-
-    record = get_file(file_id)
-    if not record:
-        if upload_path.exists():
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-        lifecycle_logger.error(
-            "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
-            bucket,
-            key,
-            file_id,
-        )
-        return _s3_error_response(
-            "InternalError",
-            "Failed to load uploaded file metadata.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
-        )
+        record = get_file(file_id)
+        if not record:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            remove_orphaned_record(file_id)
+            lifecycle_logger.error(
+                "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
+                bucket,
+                key,
+                file_id,
+            )
+            return _s3_error_response(
+                "InternalError",
+                "Failed to load uploaded file metadata.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
 
     direct_path = record["direct_path"] if record["direct_path"] else None
     if direct_path:
@@ -1551,141 +1856,187 @@ def s3_multipart_upload(bucket: str):
     return response
 
 
+@csrf.exempt
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
 @require_api_auth("s3")
 def s3_put_object(bucket: str, key: str):
-    config = get_config()
-    stream = request.stream
+    with upload_slot() as acquired:
+        if not acquired:
+            return _s3_error_response(
+                "ServiceUnavailable",
+                "Too many concurrent uploads.",
+                bucket=bucket,
+                key=key,
+                status_code=503,
+            )
 
-    hash_md5 = hashlib.md5()
-    stored_filename = secure_filename(os.path.basename(key)) or f"upload-{uuid.uuid4().hex}"
-    file_id = str(uuid.uuid4())
-    stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
-    upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+        config = get_config()
+        stream = request.stream
+        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+        if max_bytes and request.content_length and request.content_length > max_bytes:
+            return _s3_error_response(
+                "EntityTooLarge",
+                "The uploaded file exceeds the allowed size.",
+                bucket=bucket,
+                key=key,
+                status_code=413,
+            )
 
-    try:
-        with upload_path.open("wb") as destination:
-            while True:
-                chunk = stream.read(1024 * 1024)
-                if not chunk:
-                    break
-                destination.write(chunk)
-                hash_md5.update(chunk)
-    except Exception:
-        lifecycle_logger.exception(
-            "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+        hash_md5 = hashlib.md5()
+        stored_filename = (
+            secure_filename(os.path.basename(key)) or f"upload-{uuid.uuid4().hex}"
         )
-        if upload_path.exists():
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+        temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
+
+        written = 0
+        try:
+            with temp_path.open("wb") as destination:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    hash_md5.update(chunk)
+                    written += len(chunk)
+                    if max_bytes and written > max_bytes:
+                        raise ValueError("file too large")
+
+            temp_path.replace(upload_path)
+            size = written if written else upload_path.stat().st_size
+            if max_bytes and size > max_bytes:
+                raise ValueError("file too large")
+        except ValueError:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "EntityTooLarge",
+                "The uploaded file exceeds the allowed size.",
+                bucket=bucket,
+                key=key,
+                status_code=413,
+            )
+        except Exception:
+            lifecycle_logger.exception(
+                "s3_upload_failed reason=write_error bucket=%s key=%s", bucket, key
+            )
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "InternalError",
+                "Failed to store uploaded file.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
+
+        try:
+            retention_hours = resolve_retention(
+                config,
+                request.headers.get("x-amz-meta-retention-hours"),
+                request.args.get("retentionHours"),
+            )
+        except RetentionValidationError as error:
             upload_path.unlink(missing_ok=True)
             prune_empty_upload_dirs(upload_path.parent)
-        return _s3_error_response(
-            "InternalError",
-            "Failed to store uploaded file.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
-        )
+            lifecycle_logger.warning(
+                "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+            )
+            return _s3_error_response(
+                "InvalidRequest",
+                str(error),
+                bucket=bucket,
+                key=key,
+            )
 
-    try:
-        retention_hours = resolve_retention(
-            config,
-            request.headers.get("x-amz-meta-retention-hours"),
-            request.args.get("retentionHours"),
+        original_name = (
+            request.headers.get("x-amz-meta-original-filename")
+            or request.headers.get("x-amz-meta-filename")
+            or os.path.basename(key)
+            or stored_filename
         )
-    except RetentionValidationError as error:
-        upload_path.unlink(missing_ok=True)
-        prune_empty_upload_dirs(upload_path.parent)
-        lifecycle_logger.warning(
-            "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
-        )
-        return _s3_error_response(
-            "InvalidRequest",
-            str(error),
-            bucket=bucket,
-            key=key,
-        )
+        filename = secure_filename(original_name) or stored_filename
+        content_type = request.headers.get("Content-Type")
 
-    original_name = (
-        request.headers.get("x-amz-meta-original-filename")
-        or request.headers.get("x-amz-meta-filename")
-        or os.path.basename(key)
-        or stored_filename
-    )
-    filename = secure_filename(original_name) or stored_filename
+        try:
+            file_id = register_file(
+                original_name=filename,
+                stored_name=stored_name,
+                content_type=content_type,
+                size=size,
+                retention_hours=retention_hours,
+                file_id=file_id,
+            )
+        except Exception:
+            lifecycle_logger.exception(
+                "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
+            )
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            return _s3_error_response(
+                "InternalError",
+                "Failed to register uploaded file.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
 
-    size = upload_path.stat().st_size
-    content_type = request.headers.get("Content-Type")
+        record = get_file(file_id)
+        if not record:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            remove_orphaned_record(file_id)
+            lifecycle_logger.error(
+                "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
+                bucket,
+                key,
+                file_id,
+            )
+            return _s3_error_response(
+                "InternalError",
+                "Failed to load uploaded file metadata.",
+                bucket=bucket,
+                key=key,
+                status_code=500,
+            )
 
-    try:
-        file_id = register_file(
-            original_name=filename,
-            stored_name=stored_name,
-            content_type=content_type,
-            size=size,
-            retention_hours=retention_hours,
-            file_id=file_id,
-        )
-    except Exception:
-        lifecycle_logger.exception(
-            "s3_upload_failed reason=registration_error bucket=%s key=%s", bucket, key
-        )
-        if upload_path.exists():
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-        return _s3_error_response(
-            "InternalError",
-            "Failed to register uploaded file.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
-        )
+        direct_path = record["direct_path"] if record["direct_path"] else None
+        if direct_path:
+            location = url_for(
+                "serve_raw_file",
+                direct_path=direct_path,
+                _external=True,
+            )
+        else:
+            location = url_for("download", file_id=file_id, _external=True)
 
-    record = get_file(file_id)
-    if not record:
-        if upload_path.exists():
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-        lifecycle_logger.error(
-            "s3_upload_failed reason=registration_missing bucket=%s key=%s file_id=%s",
+        lifecycle_logger.info(
+            "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
+            file_id,
             bucket,
             key,
-            file_id,
-        )
-        return _s3_error_response(
-            "InternalError",
-            "Failed to load uploaded file metadata.",
-            bucket=bucket,
-            key=key,
-            status_code=500,
+            size,
+            retention_hours,
         )
 
-    direct_path = record["direct_path"] if record["direct_path"] else None
-    if direct_path:
-        location = url_for(
-            "serve_raw_file",
-            direct_path=direct_path,
-            _external=True,
+        response = _build_s3_put_success(
+            bucket,
+            key,
+            location,
+            hash_md5.hexdigest(),
         )
-    else:
-        location = url_for("download", file_id=file_id, _external=True)
-
-    lifecycle_logger.info(
-        "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
-        file_id,
-        bucket,
-        key,
-        size,
-        retention_hours,
-    )
-
-    response = _build_s3_put_success(
-        bucket,
-        key,
-        location,
-        hash_md5.hexdigest(),
-    )
-    response.headers["x-localhosting-file-id"] = file_id
-    return response
+        response.headers["x-localhosting-file-id"] = file_id
+        return response
 
 
 @app.errorhandler(404)

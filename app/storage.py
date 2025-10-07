@@ -200,7 +200,9 @@ def prune_empty_upload_dirs(path: Path) -> None:
 
 def get_db() -> sqlite3.Connection:
     ensure_directories()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -246,6 +248,10 @@ def init_db() -> None:
             conn.commit()
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_direct_path ON files(direct_path)"
+        )
+        conn.commit()
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_expires_at ON files(expires_at)"
         )
         conn.commit()
 

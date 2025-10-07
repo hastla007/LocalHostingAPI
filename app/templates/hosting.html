@@ -54,6 +54,7 @@
                   </a>
                 {% endif %}
                 <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <button
                     type="submit"
                     class="button danger icon-only"

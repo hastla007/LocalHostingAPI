@@ -21,7 +21,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         os.environ["LOCALHOSTING_UPLOADS_DIR"] = str(root / "uploads")
         os.environ["LOCALHOSTING_LOGS_DIR"] = str(root / "logs")
         self._reload_app()
-        self.app.config.update(TESTING=True)
+        self.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
         self.client = self.app.test_client()
 
     def tearDown(self):

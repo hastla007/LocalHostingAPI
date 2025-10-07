@@ -17,6 +17,7 @@
       data-api-auth-enabled="{{ 'true' if api_auth_enabled else 'false' }}"
       data-api-key="{{ api_ui_key.key if api_ui_key else '' }}"
     >
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <div
         id="drop-zone"
         class="drop-zone"

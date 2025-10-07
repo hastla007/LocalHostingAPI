@@ -93,6 +93,14 @@ If you need to relocate persisted data (for example when running the test suite 
 
 Each variable accepts absolute or relative paths. When unset, the application defaults to the in-repo `app/data` and `app/uploads` directories.
 
+Additional runtime tunables include:
+
+| Variable | Purpose |
+| --- | --- |
+| `MAX_UPLOAD_SIZE_MB` | Maximum request payload size accepted by the upload endpoints (defaults to 500 MB). |
+| `LOCALHOSTING_MAX_CONCURRENT_UPLOADS` | Upper bound on simultaneous uploads processed across the UI, native API, Box, and S3-compatible endpoints (defaults to 10). |
+| `SECRET_KEY` | Optional Flask secret key override; when unset a random key is generated and stored in `data/.secret_key` on first launch. |
+
 ## Development
 
 To run locally without Docker, create a virtual environment and start the Flask app:

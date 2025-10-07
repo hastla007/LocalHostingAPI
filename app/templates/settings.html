@@ -3,6 +3,7 @@
   <section class="card">
     <h2>Retention Settings</h2>
     <form method="post" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_retention" />
       <label for="retention_min_hours">Minimum retention (hours)</label>
       <input
@@ -47,6 +48,7 @@
   <section class="card">
     <h2>UI Authentication</h2>
     <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_ui_auth" />
 
       <label for="ui_auth_enabled" class="checkbox-label">
@@ -97,6 +99,7 @@
   <section class="card">
     <h2>API Authentication</h2>
     <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_api_auth" />
 
       <label for="api_auth_enabled" class="checkbox-label">
@@ -127,6 +130,7 @@
     <div class="api-key-management">
       <h3>API Keys</h3>
       <form method="post" class="generate-key-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <input type="hidden" name="action" value="generate_api_key" />
         <label for="api_key_label">Label (optional)</label>
         <input
@@ -141,8 +145,8 @@
       {% if config.api_keys %}
         <ul class="api-key-list">
           {% for key in config.api_keys %}
-            <li class="api-key-item">
-              <div class="api-key-header">
+          <li class="api-key-item">
+            <div class="api-key-header">
                 <div>
                   <span class="api-key-label">{{ key.label or 'Key ' ~ loop.index }}</span>
                   {% if api_ui_key and api_ui_key.id == key.id %}
@@ -156,16 +160,18 @@
                   <input type="password" value="{{ key.key }}" readonly data-api-key-input />
                   <button type="button" class="button secondary" data-api-key-toggle>Show</button>
                 </div>
-                <div class="api-key-actions">
-                  <form method="post" class="inline-form">
-                    <input type="hidden" name="action" value="set_primary_api_key" />
+              <div class="api-key-actions">
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="set_primary_api_key" />
                     <input type="hidden" name="api_key_id" value="{{ key.id }}" />
                     <button type="submit" class="button secondary" {% if api_ui_key and api_ui_key.id == key.id %}disabled{% endif %}>
                       Use for Dashboard
                     </button>
                   </form>
-                  <form method="post" class="inline-form" onsubmit="return confirm('Delete this API key? This action cannot be undone.');">
-                    <input type="hidden" name="action" value="delete_api_key" />
+                <form method="post" class="inline-form" onsubmit="return confirm('Delete this API key? This action cannot be undone.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="delete_api_key" />
                     <input type="hidden" name="api_key_id" value="{{ key.id }}" />
                     <button type="submit" class="button danger">Delete</button>
                   </form>

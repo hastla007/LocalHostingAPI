@@ -3,6 +3,7 @@
   <section class="card auth-card">
     <h2>Log in to LocalHostingAPI</h2>
     <form method="post" class="form-grid login-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <label for="username">Username</label>
       <input
         type="text"
