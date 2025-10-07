@@ -103,7 +103,6 @@ def index():
 @app.route("/hosting")
 def hosting():
     files = list(iter_files(list_files()))
-    config = load_config()
     for file in files:
         file["download_url"] = url_for("download", file_id=file["id"])
         file["direct_download_url"] = url_for(
@@ -113,7 +112,13 @@ def hosting():
             file["raw_download_url"] = url_for(
                 "serve_raw_file", direct_path=file["raw_download_path"]
             )
-    return render_template("hosting.html", files=files, config=config)
+    return render_template("hosting.html", files=files)
+
+
+@app.route("/upload-a-file")
+def upload_file_page():
+    config = load_config()
+    return render_template("upload_file.html", config=config)
 
 
 @app.route("/api-docs")

@@ -67,6 +67,9 @@
 
   <section class="card">
     <h2>Managing Stored Files</h2>
-    <p>Use the <a href="{{ url_for('hosting') }}">Hosting</a> dashboard to view, download, or delete uploads through the web interface.</p>
+    <p>
+      Use the <a href="{{ url_for('hosting') }}">Hosting</a> dashboard to view, download, or delete uploads through the web interface.
+      To upload from a browser, visit <a href="{{ url_for('upload_file_page') }}">Upload File</a> for the drag-and-drop workflow.
+    </p>
   </section>
 {% endblock %}

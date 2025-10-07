@@ -11,8 +11,20 @@ from urllib.parse import quote
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-UPLOADS_DIR = BASE_DIR / "uploads"
+
+
+def _resolve_env_path(env_key: str, default: Path) -> Path:
+    """Resolve an environment-provided path or fall back to *default*."""
+
+    value = os.environ.get(env_key)
+    if value:
+        return Path(value).expanduser().resolve()
+    return default.resolve()
+
+
+STORAGE_ROOT = _resolve_env_path("LOCALHOSTING_STORAGE_ROOT", BASE_DIR)
+DATA_DIR = _resolve_env_path("LOCALHOSTING_DATA_DIR", STORAGE_ROOT / "data")
+UPLOADS_DIR = _resolve_env_path("LOCALHOSTING_UPLOADS_DIR", STORAGE_ROOT / "uploads")
 DB_PATH = DATA_DIR / "files.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
