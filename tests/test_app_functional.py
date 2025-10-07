@@ -225,6 +225,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn(b"Retention Settings", response.data)
         self.assertIn(b"Maximum upload size", response.data)
 
+    def test_api_keys_page_renders(self):
+        response = self.client.get("/apikeys")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"API Authentication", response.data)
+
     def test_index_redirects_to_hosting(self):
         response = self.client.get("/", follow_redirects=False)
         self.assertIn(response.status_code, {301, 302, 307, 308})
@@ -612,7 +617,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
     def test_api_authentication_requires_key_for_fileupload(self):
         enable = self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "update_api_auth", "api_auth_enabled": "on"},
             follow_redirects=False,
         )
@@ -657,7 +662,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
     def test_api_authentication_applies_to_s3_and_box(self):
         enable = self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "update_api_auth", "api_auth_enabled": "on"},
             follow_redirects=False,
         )
@@ -697,9 +702,9 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(box_authorized.status_code, 201)
 
-    def test_api_key_management_via_settings(self):
+    def test_api_key_management_via_api_keys_page(self):
         self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "update_api_auth", "api_auth_enabled": "on"},
             follow_redirects=True,
         )
@@ -710,7 +715,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn("key_hash", original_keys[0])
 
         generate = self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "generate_api_key", "api_key_label": "Build Server"},
             follow_redirects=False,
         )
@@ -725,7 +730,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         new_key_id = labelled[0]["id"]
 
         self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "set_primary_api_key", "api_key_id": new_key_id},
             follow_redirects=True,
         )
@@ -733,7 +738,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(config["api_ui_key_id"], new_key_id)
 
         self.client.post(
-            "/settings",
+            "/apikeys",
             data={"action": "delete_api_key", "api_key_id": initial_id},
             follow_redirects=True,
         )

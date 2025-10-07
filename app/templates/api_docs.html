@@ -16,7 +16,7 @@
     <p>
       API authentication is
       {% if config.api_auth_enabled %}<strong>currently enabled</strong>{% else %}<strong>disabled</strong>{% endif %}
-      by default. When authentication is enabled on the <a href="{{ url_for('settings') }}">settings</a> page, every API request
+      by default. When authentication is enabled on the <a href="{{ url_for('api_keys') }}">API Keys</a> page, every API request
       must include a valid key generated from the dashboard.
     </p>
     <ul>
@@ -26,7 +26,7 @@
     </ul>
     <p>
       The dashboard automatically applies the key marked as “Dashboard Default” for browser uploads. Rotate or revoke keys at
-      any time from the settings page.
+      any time from the API Keys page.
     </p>
     <h3>Authenticated cURL Example</h3>
     <pre><code>curl -H "X-API-Key: YOUR_API_KEY" \

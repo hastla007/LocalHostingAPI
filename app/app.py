@@ -546,11 +546,20 @@ def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
 
 
 def render_settings_page(config: Dict[str, Any]):
-    """Render the settings dashboard with transient API key context."""
+    """Render the general settings dashboard."""
+
+    return render_template(
+        "settings.html",
+        config=config,
+    )
+
+
+def render_api_keys_page(config: Dict[str, Any]):
+    """Render the API key management dashboard."""
 
     new_api_key = session.pop("last_generated_api_key", None)
     return render_template(
-        "settings.html",
+        "api_keys.html",
         config=config,
         api_ui_key=get_ui_api_key(config),
         new_api_key=new_api_key,
@@ -1322,7 +1331,25 @@ def settings():
             )
             flash("UI authentication settings updated.", "success")
 
-        elif action == "update_api_auth":
+        else:
+            flash("Unsupported settings action.", "error")
+
+        if refreshed:
+            config = get_config()
+        return redirect(url_for("settings"))
+
+    return render_settings_page(config)
+
+
+@app.route("/apikeys", methods=["GET", "POST"])
+@require_ui_auth
+def api_keys():
+    config = get_config()
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        refreshed = False
+
+        if action == "update_api_auth":
             enable_api_auth = request.form.get("api_auth_enabled") == "on"
             proposed = deepcopy(config)
             proposed["api_auth_enabled"] = enable_api_auth
@@ -1384,7 +1411,7 @@ def settings():
 
             if len(remaining) == len(before):
                 flash("API key not found.", "error")
-                return redirect(url_for("settings"))
+                return redirect(url_for("api_keys"))
 
             proposed["api_keys"] = remaining
             if proposed.get("api_ui_key_id") == key_id:
@@ -1402,7 +1429,7 @@ def settings():
             proposed = deepcopy(config)
             if not any(entry.get("id") == key_id for entry in _iter_api_keys(proposed)):
                 flash("API key not found.", "error")
-                return redirect(url_for("settings"))
+                return redirect(url_for("api_keys"))
 
             proposed["api_ui_key_id"] = key_id
             save_config(proposed)
@@ -1413,13 +1440,13 @@ def settings():
             flash("Dashboard uploads will use the selected API key.", "success")
 
         else:
-            flash("Unsupported settings action.", "error")
+            flash("Unsupported API key action.", "error")
 
         if refreshed:
             config = get_config()
-        return redirect(url_for("settings"))
+        return redirect(url_for("api_keys"))
 
-    return render_settings_page(config)
+    return render_api_keys_page(config)
 
 
 @app.route("/login", methods=["GET", "POST"])
