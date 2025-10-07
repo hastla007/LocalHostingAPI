@@ -29,6 +29,22 @@ header h1 a {
   text-decoration: none;
 }
 
+header h1 a.logo {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: baseline;
+}
+
+header h1 .logo-local {
+  color: #f97316;
+  font-weight: 700;
+}
+
+header h1 .logo-api {
+  color: #fff;
+  font-weight: 600;
+}
+
 nav a {
   color: #cbd2d9;
   text-decoration: none;
