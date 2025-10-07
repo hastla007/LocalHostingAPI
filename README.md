@@ -38,7 +38,7 @@ download URLs returned by the API.
 
 ### Box-Compatible Endpoints
 
-Integrations built against Box&rsquo;s files API can point at Local Hosting API using the following routes:
+Integrations built against Box.com&rsquo;s files API can point at Local Hosting API using the following routes:
 
 - `POST /2.0/files/content` &mdash; Accepts multipart uploads with an optional `attributes` JSON part and returns Box-style metadata (including SHA-1 hashes) for each stored file.
 - `GET /2.0/files/<id>/content` &mdash; Streams the stored file back using the original filename and reported content type.

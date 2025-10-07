@@ -1,7 +1,9 @@
+import atexit
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import deque
@@ -12,6 +14,10 @@ from typing import Dict, Iterable, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except ModuleNotFoundError:  # pragma: no cover - fallback for offline environments
+    BackgroundScheduler = None  # type: ignore[assignment]
 from flask import (
     Flask,
     Response,
@@ -193,11 +199,66 @@ def _build_log_response(source: dict) -> dict:
     )
     return payload
 
+
+class _FallbackCleanupScheduler:
+    """Minimal interval scheduler used when APScheduler is unavailable."""
+
+    def __init__(self, func, *, minutes: int) -> None:
+        self.func = func
+        self.interval_seconds = max(60, minutes * 60)
+        self._logger = logging.getLogger("localhosting.scheduler")
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="cleanup-scheduler", daemon=True)
+
+    def start(self) -> None:
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def shutdown(self, wait: bool = False) -> None:
+        self._stop_event.set()
+        if wait and self._thread.is_alive():
+            self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            try:
+                self.func()
+            except Exception:  # pragma: no cover - defensive logging
+                self._logger.exception("Cleanup job failed")
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "localhostingapi-secret")
 app.logger.setLevel(numeric_level)
 
 lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+
+# Schedule periodic cleanup so requests are not blocked by retention pruning.
+try:
+    cleanup_interval = int(os.environ.get("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", "5"))
+except ValueError:
+    cleanup_interval = 5
+
+if BackgroundScheduler is not None:
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        func=cleanup_expired_files,
+        trigger="interval",
+        minutes=max(1, cleanup_interval),
+        id="cleanup_expired_files",
+        name="Clean up expired files",
+        replace_existing=True,
+    )
+else:  # pragma: no cover - exercised in environments without APScheduler
+    scheduler = _FallbackCleanupScheduler(
+        cleanup_expired_files,
+        minutes=max(1, cleanup_interval),
+    )
+
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown(wait=False))
+
+# Run a single cleanup on startup to enforce retention before serving traffic.
+cleanup_expired_files()
 
 
 class RetentionValidationError(ValueError):
@@ -317,11 +378,6 @@ def _build_s3_put_success(bucket: str, key: str, location: str, etag: str):
     response.headers["Location"] = location
     response.headers["x-amz-request-id"] = uuid.uuid4().hex
     return response
-
-
-@app.before_request
-def purge_old_files():
-    cleanup_expired_files()
 
 
 @app.context_processor
