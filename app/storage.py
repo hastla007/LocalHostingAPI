@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import quote
 
+from werkzeug.security import generate_password_hash
 from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -29,10 +30,17 @@ LOGS_DIR = _resolve_env_path("LOCALHOSTING_LOGS_DIR", STORAGE_ROOT / "logs")
 DB_PATH = DATA_DIR / "files.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+def _default_password_hash() -> str:
+    return generate_password_hash("localhostingapi")
+
+
 DEFAULT_CONFIG = {
     "retention_hours": 24.0,
     "retention_min_hours": 0.0,
     "retention_max_hours": 168.0,
+    "ui_auth_enabled": False,
+    "ui_username": "admin",
+    "ui_password_hash": _default_password_hash(),
 }
 
 CONFIG_NUMERIC_KEYS = {
@@ -40,6 +48,10 @@ CONFIG_NUMERIC_KEYS = {
     "retention_min_hours",
     "retention_max_hours",
 }
+
+CONFIG_BOOLEAN_KEYS = {"ui_auth_enabled"}
+
+CONFIG_STRING_KEYS = {"ui_username", "ui_password_hash"}
 
 
 def _coerce_numeric(value, default):
@@ -69,6 +81,30 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
         max(config["retention_hours"], config["retention_min_hours"]),
         config["retention_max_hours"],
     )
+    for key in CONFIG_BOOLEAN_KEYS:
+        if key in raw_config:
+            value = raw_config.get(key)
+            if isinstance(value, str):
+                config[key] = value.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                config[key] = bool(value)
+
+    for key in CONFIG_STRING_KEYS:
+        if key in raw_config and isinstance(raw_config.get(key), str):
+            value = raw_config.get(key).strip()
+            if key == "ui_password_hash" and not value:
+                continue
+            if key == "ui_username" and not value:
+                continue
+            config[key] = value or config[key]
+
+    if not isinstance(config["ui_username"], str) or not config["ui_username"].strip():
+        config["ui_username"] = DEFAULT_CONFIG["ui_username"]
+
+    if not isinstance(config["ui_password_hash"], str) or not config["ui_password_hash"].strip():
+        config["ui_password_hash"] = DEFAULT_CONFIG["ui_password_hash"]
+
+    config["ui_username"] = config["ui_username"].strip()
     return config
 
 

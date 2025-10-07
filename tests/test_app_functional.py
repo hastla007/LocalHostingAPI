@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 
+from werkzeug.security import check_password_hash
+
 
 class LocalHostingAppIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -169,6 +171,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(config["retention_min_hours"], 1.0)
         self.assertEqual(config["retention_max_hours"], 48.0)
         self.assertEqual(config["retention_hours"], 12.0)
+        self.assertFalse(config["ui_auth_enabled"])
 
     def test_upload_page_renders(self):
         response = self.client.get("/upload-a-file")
@@ -295,6 +298,56 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         config = self.storage.load_config()
         self.assertEqual(config["retention_min_hours"], 0.0)
+
+    def test_login_redirects_when_auth_disabled(self):
+        response = self.client.get("/login", follow_redirects=False)
+        self.assertIn(response.status_code, {301, 302})
+        self.assertEqual(response.headers["Location"], "/hosting")
+
+    def test_ui_authentication_flow(self):
+        enable_response = self.client.post(
+            "/settings",
+            data={
+                "retention_min_hours": "0",
+                "retention_max_hours": "168",
+                "retention_hours": "24",
+                "ui_auth_enabled": "on",
+                "ui_username": "manager",
+                "ui_password": "s3cret!",
+                "ui_password_confirm": "s3cret!",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(enable_response.status_code, 200)
+
+        config = self.storage.load_config()
+        self.assertTrue(config["ui_auth_enabled"])
+        self.assertEqual(config["ui_username"], "manager")
+        self.assertTrue(check_password_hash(config["ui_password_hash"], "s3cret!"))
+
+        logout_response = self.client.post("/logout", follow_redirects=False)
+        self.assertIn(logout_response.status_code, {301, 302})
+        self.assertEqual(logout_response.headers["Location"], "/login")
+
+        hosting_redirect = self.client.get("/hosting", follow_redirects=False)
+        self.assertIn(hosting_redirect.status_code, {301, 302})
+        self.assertEqual(hosting_redirect.headers["Location"], "/login")
+
+        bad_login = self.client.post(
+            "/login",
+            data={"username": "manager", "password": "wrong"},
+            follow_redirects=True,
+        )
+        self.assertEqual(bad_login.status_code, 200)
+        self.assertIn("Invalid username or password", bad_login.data.decode())
+
+        good_login = self.client.post(
+            "/login",
+            data={"username": "manager", "password": "s3cret!"},
+            follow_redirects=True,
+        )
+        self.assertEqual(good_login.status_code, 200)
+        self.assertIn("Uploaded Files", good_login.data.decode())
 
     def test_reserved_direct_paths_are_regenerated(self):
         with self.storage.get_db() as conn:

@@ -8,9 +8,10 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from secrets import compare_digest
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 
@@ -23,15 +24,18 @@ from flask import (
     Response,
     abort,
     flash,
+    g,
     jsonify,
     make_response,
     redirect,
     render_template,
     request,
     send_file,
+    session,
     url_for,
 )
 from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from .storage import (
     LOGS_DIR,
@@ -200,6 +204,37 @@ def _build_log_response(source: dict) -> dict:
     return payload
 
 
+def get_config(refresh: bool = False) -> Dict[str, Any]:
+    config = getattr(g, "_app_config", None)
+    if refresh or config is None:
+        config = load_config()
+        g._app_config = config
+    return config
+
+
+def ui_auth_enabled() -> bool:
+    config = get_config()
+    return bool(config.get("ui_auth_enabled"))
+
+
+def ui_user_authenticated() -> bool:
+    return bool(session.get("ui_authenticated"))
+
+
+def require_ui_auth(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not ui_auth_enabled() or ui_user_authenticated():
+            return view(*args, **kwargs)
+
+        next_target = request.full_path if request.query_string else request.path
+        session["ui_next"] = (next_target or "/").rstrip("?")
+        flash("Please log in to access the dashboard.", "info")
+        return redirect(url_for("login"))
+
+    return wrapped
+
+
 class _FallbackCleanupScheduler:
     """Minimal interval scheduler used when APScheduler is unavailable."""
 
@@ -231,6 +266,16 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "localhostingapi-secret"
 app.logger.setLevel(numeric_level)
 
 lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+
+
+@app.context_processor
+def inject_ui_state():
+    config = get_config()
+    return {
+        "ui_auth_enabled": bool(config.get("ui_auth_enabled")),
+        "ui_authenticated": ui_user_authenticated(),
+        "ui_username": config.get("ui_username", "admin"),
+    }
 
 # Schedule periodic cleanup so requests are not blocked by retention pruning.
 try:
@@ -425,11 +470,13 @@ def human_timedelta(seconds: float) -> str:
 
 
 @app.route("/")
+@require_ui_auth
 def index():
     return redirect(url_for("hosting"))
 
 
 @app.route("/hosting")
+@require_ui_auth
 def hosting():
     files = list(iter_files(list_files()))
     for file in files:
@@ -445,18 +492,21 @@ def hosting():
 
 
 @app.route("/upload-a-file")
+@require_ui_auth
 def upload_file_page():
-    config = load_config()
+    config = get_config()
     return render_template("upload_file.html", config=config)
 
 
 @app.route("/api-docs")
+@require_ui_auth
 def api_docs():
-    config = load_config()
+    config = get_config()
     return render_template("api_docs.html", config=config)
 
 
 @app.route("/logs")
+@require_ui_auth
 def logs_page():
     source_id = request.args.get("source")
     selected, sources = _select_log_source(source_id)
@@ -471,6 +521,7 @@ def logs_page():
 
 
 @app.route("/logs/data")
+@require_ui_auth
 def logs_data():
     source_id = request.args.get("source")
     selected, _ = _select_log_source(source_id)
@@ -479,6 +530,7 @@ def logs_data():
 
 
 @app.route("/hosting/delete/<file_id>", methods=["POST"])
+@require_ui_auth
 def hosting_delete(file_id: str):
     if delete_file(file_id):
         flash("File deleted successfully.", "success")
@@ -490,8 +542,9 @@ def hosting_delete(file_id: str):
 
 
 @app.route("/settings", methods=["GET", "POST"])
+@require_ui_auth
 def settings():
-    config = load_config()
+    config = get_config()
     if request.method == "POST":
         try:
             retention_min = float(
@@ -516,6 +569,24 @@ def settings():
             }
         )
 
+        auth_enabled = request.form.get("ui_auth_enabled") == "on"
+        username = request.form.get("ui_username", config.get("ui_username", "admin")).strip()
+        password = request.form.get("ui_password", "")
+        confirm = request.form.get("ui_password_confirm", "")
+
+        proposed_config["ui_auth_enabled"] = auth_enabled
+        proposed_config["ui_username"] = username or config.get("ui_username", "admin")
+
+        if auth_enabled and not username:
+            flash("Username cannot be empty when UI authentication is enabled.", "error")
+            return render_template("settings.html", config=proposed_config)
+
+        if password or confirm:
+            if password != confirm:
+                flash("Password confirmation does not match.", "error")
+                return render_template("settings.html", config=proposed_config)
+            proposed_config["ui_password_hash"] = generate_password_hash(password)
+
         if retention_min < 0:
             flash("Minimum retention cannot be negative.", "error")
             return render_template("settings.html", config=proposed_config)
@@ -527,15 +598,71 @@ def settings():
             return render_template("settings.html", config=proposed_config)
 
         save_config(proposed_config)
+        get_config(refresh=True)
+
+        if auth_enabled:
+            session["ui_authenticated"] = True
+            session["ui_username"] = proposed_config["ui_username"]
+        else:
+            session.pop("ui_authenticated", None)
+            session.pop("ui_username", None)
+
         lifecycle_logger.info(
             "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
             retention_min,
             retention_max,
             retention_hours,
         )
+        lifecycle_logger.info(
+            "ui_auth_updated enabled=%s username=%s",
+            auth_enabled,
+            proposed_config["ui_username"],
+        )
         flash("Settings updated successfully.", "success")
         return redirect(url_for("settings"))
     return render_template("settings.html", config=config)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    config = get_config()
+    if not config.get("ui_auth_enabled"):
+        next_url = session.pop("ui_next", None)
+        return redirect(next_url or url_for("hosting"))
+
+    if ui_user_authenticated():
+        next_url = session.pop("ui_next", None)
+        return redirect(next_url or url_for("hosting"))
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        expected_username = config.get("ui_username", "admin")
+        password_hash = config.get("ui_password_hash", "")
+
+        if compare_digest(username, expected_username) and check_password_hash(
+            password_hash, password
+        ):
+            session["ui_authenticated"] = True
+            session["ui_username"] = expected_username
+            flash("Logged in successfully.", "success")
+            next_url = session.pop("ui_next", None)
+            return redirect(next_url or url_for("hosting"))
+
+        flash("Invalid username or password.", "error")
+
+    return render_template("login.html", config=config)
+
+
+@app.route("/logout", methods=["POST"])
+@require_ui_auth
+def logout():
+    session.pop("ui_authenticated", None)
+    session.pop("ui_username", None)
+    flash("You have been logged out.", "success")
+    if ui_auth_enabled():
+        return redirect(url_for("login"))
+    return redirect(url_for("hosting"))
 
 
 @app.route("/fileupload", methods=["POST"])
@@ -561,7 +688,7 @@ def fileupload():
         app.logger.warning("upload_failed reason=no_file_selected")
         return jsonify({"error": "No file selected"}), 400
 
-    config = load_config()
+    config = get_config()
     payload = request.get_json(silent=True) if request.is_json else None
     try:
         retention_hours = resolve_retention(
@@ -718,7 +845,7 @@ def direct_download(file_id: str, filename: str):
 
 @app.route("/2.0/files/content", methods=["POST"])
 def box_upload_files():
-    config = load_config()
+    config = get_config()
     uploads = request.files.getlist("file")
     if not uploads:
         lifecycle_logger.warning("box_upload_failed reason=no_file_part")
@@ -998,7 +1125,7 @@ def serve_raw_file(direct_path: str):
 
 @app.route("/s3/<bucket>", methods=["POST"])
 def s3_multipart_upload(bucket: str):
-    config = load_config()
+    config = get_config()
     upload = request.files.get("file")
     if upload is None:
         return _s3_error_response(
@@ -1104,7 +1231,7 @@ def s3_multipart_upload(bucket: str):
 
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
 def s3_put_object(bucket: str, key: str):
-    config = load_config()
+    config = get_config()
     stream = request.stream
 
     hash_md5 = hashlib.md5()

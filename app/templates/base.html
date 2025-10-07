@@ -20,6 +20,15 @@
         <a href="{{ url_for('upload_file_page') }}" class="{{ 'active' if request.endpoint == 'upload_file_page' else '' }}">Upload File</a>
         <a href="{{ url_for('api_docs') }}" class="{{ 'active' if request.endpoint == 'api_docs' else '' }}">API Docs</a>
         <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' else '' }}">Settings</a>
+        {% if ui_auth_enabled %}
+          {% if ui_authenticated %}
+            <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+              <button type="submit" class="link-button">Log out</button>
+            </form>
+          {% else %}
+            <a href="{{ url_for('login') }}" class="{{ 'active' if request.endpoint == 'login' else '' }}">Log in</a>
+          {% endif %}
+        {% endif %}
       </nav>
     </header>
     <main>

@@ -50,6 +50,12 @@ Uploads handled through these endpoints respect the configured retention bounds,
 
 Visit <http://localhost:8000/settings> to update the retention policy. You can define minimum and maximum retention windows (in hours) plus the default applied to new uploads. API clients and the dashboard uploader may request any value within that range. Existing files keep their originally assigned expiration times.
 
+### Optional UI Authentication
+
+Authentication for the HTML dashboard is disabled by default so anyone on the local network can browse uploads. Enable it from the settings page by ticking **Require login for dashboard pages** and providing a username and password. The initial credentials are `admin` / `localhostingapi` and can be replaced at any time.
+
+Once UI auth is turned on, visits to `/hosting`, `/upload-a-file`, `/logs`, `/api-docs`, and `/settings` will redirect to the `/login` page until valid credentials are supplied. API endpoints remain unauthenticated so existing integrations continue to work. Use the **Log out** control in the navigation bar to end the session.
+
 ## Project Structure
 
 ```
