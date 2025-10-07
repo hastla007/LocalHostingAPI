@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>API Overview</h2>
+    <p>The Local Hosting API allows clients on your LAN to upload files and retrieve them later using simple HTTP requests.</p>
+    <p>Base URL: <code>{{ request.url_root.rstrip('/') }}</code></p>
+    <p>
+      Files expire automatically according to the retention policy configured on the <a href="{{ url_for('settings') }}">settings</a> page.
+      Current bounds allow custom expirations between <strong>{{ config.retention_min_hours }}</strong> and <strong>{{ config.retention_max_hours }}</strong> hours
+      with a default of <strong>{{ config.retention_hours }}</strong> hours.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Authentication</h2>
+    <p>
+      API authentication is
+      {% if config.api_auth_enabled %}<strong>currently enabled</strong>{% else %}<strong>disabled</strong>{% endif %}
+      by default. When authentication is enabled on the <a href="{{ url_for('settings') }}">settings</a> page, every API request
+      must include a valid key generated from the dashboard.
+    </p>
+    <ul>
+      <li>Provide the key via the <code>X-API-Key</code> header (recommended) or as an <code>Authorization: Bearer &lt;key&gt;</code> header.</li>
+      <li>The <code>api_key</code> query-string parameter is also honoured for simple integrations.</li>
+      <li>Keys affect all upload endpoints, including the S3- and Box-compatible routes documented below.</li>
+    </ul>
+    <p>
+      The dashboard automatically applies the key marked as “Dashboard Default” for browser uploads. Rotate or revoke keys at
+      any time from the settings page.
+    </p>
+    <h3>Authenticated cURL Example</h3>
+    <pre><code>curl -H "X-API-Key: YOUR_API_KEY" \
+  -F "file=@/path/to/your/file" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+  </section>
+
+  <section class="card">
+    <h2>Upload a File</h2>
+    <p><strong>Endpoint:</strong> <code>POST /fileupload</code></p>
+    <p>
+      Send a multipart/form-data request with one or more fields named <code>file</code>. Every file in the payload is stored
+      with the same retention window supplied in the request.
+    </p>
+    <p>
+      Optional fields:
+    </p>
+    <ul>
+      <li><code>retention_hours</code> &mdash; number of hours to keep this upload (must be within the configured range).</li>
+    </ul>
+    <h3>Single File cURL Example</h3>
+    <pre><code>curl -F "file=@/path/to/your/file" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+    <h3>Multi-file cURL Example</h3>
+    <pre><code>curl -F "file=@/path/to/first.txt" \
+  -F "file=@/path/to/second.jpg" \
+  -F "retention_hours=6" \
+  {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+    <h3>Sample JSON Response</h3>
+    <pre><code>{
+  "id": "b0f6f1a3a2f744e0a33e8b9ef9b31dc7",
+  "filename": "document.pdf",
+  "size": 523980,
+  "download_url": "{{ request.url_root.rstrip('/') }}/download/&lt;id&gt;",
+  "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf",
+  "raw_download_url": "{{ request.url_root.rstrip('/') }}/document.pdf",
+  "raw_download_path": "document.pdf",
+  "retention_hours": {{ config.retention_hours }},
+  "uploaded_at": 1717430587.706497,
+  "expires_at": 1717516987.706497,
+  "expires_at_iso": "2024-06-04T18:43:07",
+  "message": "File uploaded successfully."
+}</code></pre>
+    <p>When multiple files are uploaded, the API responds with an array containing the same metadata for each file:</p>
+    <pre><code>{
+  "message": "Uploaded 2 files successfully.",
+  "retention_hours": 6.0,
+  "files": [
+    {
+      "id": "a1b2",
+      "filename": "first.txt",
+      "download_url": "{{ request.url_root.rstrip('/') }}/download/&lt;id&gt;",
+      "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/first.txt",
+      "raw_download_url": "{{ request.url_root.rstrip('/') }}/first.txt",
+      "raw_download_path": "first.txt",
+      "retention_hours": 6.0,
+      "uploaded_at": 1717430587.706497,
+      "expires_at": 1717659787.706497,
+      "expires_at_iso": "2024-06-07T08:43:07",
+      "size": 5120
+    },
+    {
+      "id": "c3d4",
+      "filename": "second.jpg",
+      "download_url": "{{ request.url_root.rstrip('/') }}/download/&lt;id&gt;",
+      "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/second.jpg",
+      "raw_download_url": "{{ request.url_root.rstrip('/') }}/second.jpg",
+      "raw_download_path": "second.jpg",
+      "retention_hours": 6.0,
+      "uploaded_at": 1717430587.912312,
+      "expires_at": 1717659787.912312,
+      "expires_at_iso": "2024-06-07T08:43:07",
+      "size": 1048576
+    }
+  ]
+}</code></pre>
+    <p><strong>Status Codes:</strong></p>
+    <ul>
+      <li><code>201 Created</code> – file was stored successfully.</li>
+      <li><code>400 Bad Request</code> – the request was invalid (missing file, bad filename, or retention outside the allowed range).</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>S3-Compatible Uploads</h2>
+    <p>
+      The Local Hosting API exposes lightweight Amazon S3 style endpoints for drop-in compatibility with tooling that expects
+      object storage semantics.
+    </p>
+    <h3>POST Form Upload</h3>
+    <p><strong>Endpoint:</strong> <code>POST /s3/&lt;bucket&gt;</code></p>
+    <p>
+      Send a multipart form submission that includes the standard S3 fields such as <code>key</code> and <code>file</code>. Optional
+      retention can be provided with the custom field <code>x-amz-meta-retention-hours</code>.
+    </p>
+    <p>Include the <code>X-API-Key</code> header when API authentication is enabled.</p>
+    <pre><code>curl -X POST \
+  -F "key=uploads/${filename}" \
+  -F "x-amz-meta-retention-hours=12" \
+  -F "file=@/path/to/your/file.txt" \
+  {{ request.url_root.rstrip('/') }}/s3/example-bucket</code></pre>
+    <p>
+      Successful uploads return <code>201 Created</code> with an XML payload mirroring S3&rsquo;s <code>&lt;PostResponse&gt;</code>
+      including the resolved object location, key, and ETag. The <code>x-localhosting-file-id</code> header exposes the internal
+      identifier so you can still reach the classic download endpoints if needed.
+    </p>
+
+    <h3>PUT Object Upload</h3>
+    <p><strong>Endpoint:</strong> <code>PUT /s3/&lt;bucket&gt;/&lt;key&gt;</code></p>
+    <p>
+      Issue a raw PUT with the file contents in the request body. Custom retention is accepted through the
+      <code>X-Amz-Meta-Retention-Hours</code> header or a <code>retentionHours</code> query parameter.
+    </p>
+    <p>Provide the same <code>X-API-Key</code> header if authentication is enabled for the service.</p>
+    <pre><code>curl -X PUT \
+  -H "Content-Type: video/mp4" \
+  -H "X-Amz-Meta-Retention-Hours: 24" \
+  --data-binary @movie.mp4 \
+  {{ request.url_root.rstrip('/') }}/s3/example-bucket/media/movie.mp4</code></pre>
+    <p>
+      A successful PUT returns <code>200 OK</code> with an S3-style <code>&lt;PutObjectResult&gt;</code> XML body alongside the generated
+      ETag and object location headers.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Box-Compatible Endpoints</h2>
+    <p>
+      To integrate with SDKs or automation that expect Box.com&rsquo;s file APIs, Local Hosting API exposes lightweight
+      compatibility routes that mirror the core upload and download behaviour.
+    </p>
+    <h3>Upload Content</h3>
+    <p><strong>Endpoint:</strong> <code>POST /2.0/files/content</code></p>
+    <p>
+      Send a multipart form-data request with a file field named <code>file</code>. Optional metadata can be supplied via
+      an <code>attributes</code> field containing JSON, matching the payload format the Box API expects. The response
+      returns an <code>entries</code> array with Box-style metadata including SHA-1 hashes and shareable download URLs.
+    </p>
+    <p>All Box-compatible requests accept the <code>X-API-Key</code> or <code>Authorization</code> header when API authentication is active.</p>
+    <pre><code>curl -X POST \
+  -F "attributes={\"name\":\"report.pdf\"}" \
+  -F "file=@/path/to/report.pdf" \
+  {{ request.url_root.rstrip('/') }}/2.0/files/content</code></pre>
+    <h4>Sample JSON Response</h4>
+    <pre><code>{
+  "total_count": 1,
+  "entries": [
+    {
+      "type": "file",
+      "id": "1234567890",
+      "sequence_id": "0",
+      "etag": "0",
+      "sha1": "6a9c1b5b6f5b88f16a5aa764f4144f8aa5a61234",
+      "name": "report.pdf",
+      "size": 523980,
+      "created_at": "2024-06-04T18:43:07Z",
+      "modified_at": "2024-06-04T18:43:07Z",
+      "expires_at": "2024-06-07T18:43:07Z",
+      "retention_hours": {{ config.retention_hours }},
+      "download_url": "{{ request.url_root.rstrip('/') }}/2.0/files/1234567890/content",
+      "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/1234567890/report.pdf",
+      "raw_download_url": "{{ request.url_root.rstrip('/') }}/report.pdf"
+    }
+  ]
+}</code></pre>
+    <h3>Download Content</h3>
+    <p><strong>Endpoint:</strong> <code>GET /2.0/files/&lt;id&gt;/content</code></p>
+    <p>
+      Streams the stored file back with the original filename and content type. The returned payload is the raw file
+      bytes, so you can pipe the response directly to disk.
+    </p>
+    <pre><code>curl -L -o report.pdf {{ request.url_root.rstrip('/') }}/2.0/files/&lt;id&gt;/content</code></pre>
+    <h3>File Request Metadata</h3>
+    <p><strong>Endpoint:</strong> <code>GET /2.0/file_requests/&lt;id&gt;</code></p>
+    <p>
+      Returns a JSON document describing the stored file with fields such as <code>title</code>, <code>status</code>,
+      <code>upload_url</code>, and <code>url</code> so Box automations can link directly to the compatible upload and
+      download routes.
+    </p>
+    <h4>Sample JSON Response</h4>
+    <pre><code>{
+  "type": "file_request",
+  "id": "1234567890",
+  "title": "Upload report.pdf",
+  "description": "Local Hosting API Box-compatible upload",
+  "status": "active",
+  "retention_hours": {{ config.retention_hours }},
+  "upload_url": "{{ request.url_root.rstrip('/') }}/2.0/files/content",
+  "url": "{{ request.url_root.rstrip('/') }}/2.0/files/1234567890/content",
+  "download_url": "{{ request.url_root.rstrip('/') }}/download/1234567890",
+  "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/1234567890/report.pdf",
+  "raw_download_url": "{{ request.url_root.rstrip('/') }}/report.pdf"
+}</code></pre>
+  </section>
+
+  <section class="card">
+    <h2>Download a File</h2>
+    <p><strong>Endpoint:</strong> <code>GET /download/&lt;id&gt;</code></p>
+    <p>Use the <code>download_url</code> returned during upload or substitute the file ID:</p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/download/&lt;id&gt;</code></pre>
+    <p>
+      A second direct endpoint preserves the original filename in the URL for easier sharing:
+      <code>GET /files/&lt;id&gt;/&lt;original_filename&gt;</code>.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf</code></pre>
+    <p>
+      New uploads also receive a raw filename URL that omits the ID entirely, ideal for inline playback or embedding:
+      <code>GET /&lt;original_filename&gt;</code>. If a filename is already in use, a numeric suffix (for example <code>report-1.pdf</code>) is appended to keep the paths unique.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/document.pdf</code></pre>
+    <p>
+      All endpoints honor the original filename and require the file to be unexpired; otherwise a <code>404 Not Found</code> is returned.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Managing Stored Files</h2>
+    <p>
+      Use the <a href="{{ url_for('hosting') }}">Hosting</a> dashboard to view, download, or delete uploads through the web interface.
+      To upload from a browser, visit <a href="{{ url_for('upload_file_page') }}">Upload File</a> for the drag-and-drop workflow.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Monitoring &amp; Logs</h2>
+    <p>
+      The <a href="{{ url_for('logs_page') }}">Logs</a> page streams the latest application output, including upload and download lifecycle entries.
+      Use the manual refresh button or enable one of the automatic polling intervals to keep the view up to date. If you expose a Docker log file via
+      the <code>LOCALHOSTING_DOCKER_LOG_PATH</code> environment variable, it will appear alongside the built-in application log.
+    </p>
+  </section>
+{% endblock %}
