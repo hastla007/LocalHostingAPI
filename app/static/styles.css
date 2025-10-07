@@ -100,6 +100,31 @@ main {
   margin-bottom: 1.5rem;
 }
 
+.file-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.search-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.search-form input[type="text"] {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  min-width: 220px;
+}
+
+.search-form .button {
+  margin: 0;
+}
+
 .file-table {
   width: 100%;
   border-collapse: collapse;
@@ -114,6 +139,43 @@ main {
 
 .file-table th {
   background: #f9fafb;
+}
+
+.file-table th a {
+  color: inherit;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.file-table th a:hover,
+.file-table th a:focus-visible {
+  color: #2563eb;
+}
+
+.sort-indicator {
+  font-size: 0.8em;
+  color: #6b7280;
+}
+
+.pagination-info {
+  text-align: center;
+  color: #6b7280;
+  margin-bottom: 1rem;
+}
+
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+
+.pagination .page-info {
+  color: #374151;
 }
 
 .actions-cell {
@@ -208,6 +270,46 @@ main {
 .button.secondary.icon-only:hover,
 .button.secondary.icon-only:focus-visible {
   background: rgba(14, 165, 233, 0.12);
+}
+
+.api-key-hint {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.new-key-display {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.new-key-display input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.alert {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  border: 1px solid transparent;
+  font-size: 0.9rem;
+}
+
+.alert.success {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.alert.warning {
+  background: #fef3c7;
+  border-color: #fcd34d;
+  color: #92400e;
 }
 
 .button .icon {

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -22,12 +23,39 @@ try:
     from apscheduler.schedulers.background import BackgroundScheduler
 except ModuleNotFoundError:  # pragma: no cover - fallback for offline environments
     BackgroundScheduler = None  # type: ignore[assignment]
+
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    HAS_LIMITER = True
+except ModuleNotFoundError:  # pragma: no cover - fallback for offline environments
+    HAS_LIMITER = False
+
+    class Limiter:  # type: ignore[override]
+        def __init__(self, *args, **kwargs):
+            self.limit = self._passthrough
+
+        def _passthrough(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                return None
+
+            return method
+
+    def get_remote_address() -> str:
+        return request.remote_addr or "127.0.0.1"
 from flask import (
     Flask,
     Response,
     abort,
     flash,
     g,
+    has_request_context,
     jsonify,
     make_response,
     redirect,
@@ -76,6 +104,7 @@ from .storage import (
     iter_files,
     list_files,
     load_config,
+    hash_api_key,
     prune_empty_upload_dirs,
     register_file,
     save_config,
@@ -97,6 +126,44 @@ logging.basicConfig(
     level=numeric_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
+
+class RequestAwareLogger:
+    """Logger wrapper that injects request IDs into log messages."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+
+    def _with_request(self, message: str) -> str:
+        if has_request_context():
+            request_id = getattr(g, "request_id", None)
+            if request_id:
+                return f"request_id={request_id} {message}"
+        return message
+
+    def debug(self, msg: str, *args, **kwargs) -> None:
+        self._logger.debug(self._with_request(msg), *args, **kwargs)
+
+    def info(self, msg: str, *args, **kwargs) -> None:
+        self._logger.info(self._with_request(msg), *args, **kwargs)
+
+    def warning(self, msg: str, *args, **kwargs) -> None:
+        self._logger.warning(self._with_request(msg), *args, **kwargs)
+
+    def error(self, msg: str, *args, **kwargs) -> None:
+        self._logger.error(self._with_request(msg), *args, **kwargs)
+
+    def critical(self, msg: str, *args, **kwargs) -> None:
+        self._logger.critical(self._with_request(msg), *args, **kwargs)
+
+    def exception(self, msg: str, *args, **kwargs) -> None:
+        self._logger.exception(self._with_request(msg), *args, **kwargs)
+
+    def log(self, level: int, msg: str, *args, **kwargs) -> None:
+        self._logger.log(level, self._with_request(msg), *args, **kwargs)
+
+    def __getattr__(self, name: str):  # pragma: no cover - passthrough
+        return getattr(self._logger, name)
 
 
 def _configure_file_logging() -> Path:
@@ -272,7 +339,7 @@ def api_auth_enabled() -> bool:
 def _iter_api_keys(config: Optional[Dict[str, Any]] = None) -> Iterable[dict]:
     config = config or get_config()
     for entry in config.get("api_keys", []):
-        if isinstance(entry, dict) and entry.get("key") and entry.get("id"):
+        if isinstance(entry, dict) and entry.get("key_hash") and entry.get("id"):
             yield entry
 
 
@@ -285,6 +352,18 @@ def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
         if entry.get("id") == key_id:
             return entry
     return None
+
+
+def render_settings_page(config: Dict[str, Any]):
+    """Render the settings dashboard with transient API key context."""
+
+    new_api_key = session.pop("last_generated_api_key", None)
+    return render_template(
+        "settings.html",
+        config=config,
+        api_ui_key=get_ui_api_key(config),
+        new_api_key=new_api_key,
+    )
 
 
 def _extract_api_key_from_request() -> Optional[str]:
@@ -323,8 +402,9 @@ def _api_auth_error(response_format: str = "json") -> Response:
 def _api_key_matches(provided: Optional[str]) -> bool:
     if not provided:
         return False
+    provided_hash = hash_api_key(provided)
     for entry in _iter_api_keys():
-        if compare_digest(entry.get("key", ""), provided):
+        if compare_digest(entry.get("key_hash", ""), provided_hash):
             return True
     return False
 
@@ -354,9 +434,11 @@ def require_api_auth(response_format: str = "json"):
 
 
 def _generate_api_key_entry(label: str = "") -> dict:
+    raw_key = secrets.token_urlsafe(32)
     return {
         "id": uuid.uuid4().hex,
-        "key": secrets.token_urlsafe(32),
+        "key": raw_key,
+        "key_hash": hash_api_key(raw_key),
         "label": (label or "").strip(),
         "created_at": time.time(),
     }
@@ -389,6 +471,13 @@ class _FallbackCleanupScheduler:
                 self._logger.exception("Cleanup job failed")
 
 app = Flask(__name__)
+
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri=os.environ.get("LOCALHOSTING_RATE_LIMIT_STORAGE", "memory://"),
+)
 
 try:
     max_upload_size_mb = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500"))
@@ -423,7 +512,9 @@ app.config["SECRET_KEY"] = secret_key
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 
-lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+_base_lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+_base_lifecycle_logger.setLevel(numeric_level)
+lifecycle_logger = RequestAwareLogger(_base_lifecycle_logger)
 
 if not HAS_FLASK_WTF:
 
@@ -451,6 +542,57 @@ def upload_slot() -> Iterator[bool]:
             upload_semaphore.release()
 
 
+@app.before_request
+def add_request_id() -> None:
+    """Assign a request identifier for downstream logging."""
+
+    g.request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex)
+
+
+@app.after_request
+def log_request_completion(response: Response):
+    """Emit lifecycle logs for every completed request."""
+
+    lifecycle_logger.info(
+        "request_completed method=%s path=%s status=%d size=%s",
+        request.method,
+        request.path,
+        response.status_code,
+        response.calculate_content_length() if hasattr(response, "calculate_content_length") else response.content_length or 0,
+    )
+    return response
+
+
+@app.after_request
+def add_security_headers(response: Response):
+    """Attach security-focused response headers."""
+
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self';"
+    )
+    response.headers["Content-Security-Policy"] = csp
+    return response
+
+
+@app.after_request
+def add_request_id_header(response: Response):
+    """Expose the current request identifier to clients."""
+
+    if hasattr(g, "request_id"):
+        response.headers["X-Request-ID"] = g.request_id
+    return response
+
+
 @app.errorhandler(413)
 def handle_file_too_large(error):  # pragma: no cover - framework hook
     message = {"error": "File too large"}
@@ -463,6 +605,15 @@ def handle_file_too_large(error):  # pragma: no cover - framework hook
         flash("The uploaded file exceeds the allowed size limit.", "error")
         return redirect(request.referrer or url_for("upload_file_page")), 303
     return jsonify(message), 413
+
+
+@app.errorhandler(429)
+def handle_rate_limit(error):  # pragma: no cover - framework hook
+    description = getattr(error, "description", "Too many requests")
+    if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+        return jsonify({"error": "Rate limit exceeded", "message": str(description)}), 429
+    flash("Too many requests. Please try again later.", "error")
+    return redirect(request.referrer or url_for("hosting")), 303
 
 
 @app.errorhandler(CSRFError)
@@ -701,11 +852,68 @@ def index():
     return redirect(url_for("hosting"))
 
 
+@app.route("/health")
+def health_check():
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_healthy = True
+    except Exception:
+        db_healthy = False
+
+    usage = shutil.disk_usage(UPLOADS_DIR)
+    disk_free_gb = usage.free / (1024 ** 3)
+    status = "healthy" if db_healthy and disk_free_gb > 1 else "unhealthy"
+    code = 200 if status == "healthy" else 503
+
+    return jsonify(
+        {
+            "status": status,
+            "timestamp": time.time(),
+            "checks": {
+                "database": "ok" if db_healthy else "error",
+                "disk_space_gb": round(disk_free_gb, 2),
+            },
+            "version": "1.0.0",
+        }
+    ), code
+
+
 @app.route("/hosting")
 @require_ui_auth
 def hosting():
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = request.args.get("per_page", 50, type=int)
+    per_page = max(1, min(per_page, 200))
+    search = request.args.get("search", "").strip()
+    sort_by = request.args.get("sort", "uploaded_at")
+    sort_order = request.args.get("order", "desc").lower()
+
     files = list(iter_files(list_files()))
-    for file in files:
+
+    if search:
+        lowered = search.lower()
+        files = [file for file in files if lowered in file["original_name"].lower()]
+
+    sort_key_map = {
+        "name": lambda f: f["original_name"].lower(),
+        "size": lambda f: f["size"],
+        "uploaded_at": lambda f: f["uploaded_at"],
+        "expires_at": lambda f: f["expires_at"],
+    }
+    sort_key = sort_key_map.get(sort_by, sort_key_map["uploaded_at"])
+    reverse = sort_order != "asc"
+    files.sort(key=sort_key, reverse=reverse)
+
+    total_files = len(files)
+    total_pages = max(1, (total_files + per_page - 1) // per_page)
+    if page > total_pages:
+        page = total_pages
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_files = files[start:end]
+
+    for file in page_files:
         file["download_url"] = url_for("download", file_id=file["id"])
         file["direct_download_url"] = url_for(
             "direct_download", file_id=file["id"], filename=file["original_name"]
@@ -714,7 +922,18 @@ def hosting():
             file["raw_download_url"] = url_for(
                 "serve_raw_file", direct_path=file["raw_download_path"]
             )
-    return render_template("hosting.html", files=files)
+
+    return render_template(
+        "hosting.html",
+        files=page_files,
+        page=page,
+        per_page=per_page,
+        total_files=total_files,
+        total_pages=total_pages,
+        search=search,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
 
 
 @app.route("/upload-a-file")
@@ -793,7 +1012,7 @@ def settings():
                 )
             except (TypeError, ValueError):
                 flash("Please provide valid numbers for retention settings.", "error")
-                return render_template("settings.html", config=config, api_ui_key=get_ui_api_key(config))
+                return render_settings_page(config)
 
             proposed = deepcopy(config)
             proposed.update(
@@ -806,19 +1025,19 @@ def settings():
 
             if retention_min < 0:
                 flash("Minimum retention cannot be negative.", "error")
-                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                return render_settings_page(proposed)
             if retention_max < retention_min:
                 flash(
                     "Maximum retention must be greater than or equal to the minimum.",
                     "error",
                 )
-                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                return render_settings_page(proposed)
             if not (retention_min <= retention_hours <= retention_max):
                 flash(
                     "Default retention must fall within the configured bounds.",
                     "error",
                 )
-                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                return render_settings_page(proposed)
 
             save_config(proposed)
             get_config(refresh=True)
@@ -843,12 +1062,12 @@ def settings():
 
             if auth_enabled and not username:
                 flash("Username cannot be empty when UI authentication is enabled.", "error")
-                return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                return render_settings_page(proposed)
 
             if password or confirm:
                 if password != confirm:
                     flash("Password confirmation does not match.", "error")
-                    return render_template("settings.html", config=proposed, api_ui_key=get_ui_api_key(proposed))
+                    return render_settings_page(proposed)
                 proposed["ui_password_hash"] = generate_password_hash(password)
 
             save_config(proposed)
@@ -875,10 +1094,13 @@ def settings():
             proposed["api_auth_enabled"] = enable_api_auth
 
             auto_key = None
+            auto_key_raw = None
             if enable_api_auth and not list(_iter_api_keys(proposed)):
-                auto_key = _generate_api_key_entry()
-                proposed.setdefault("api_keys", []).append(auto_key)
-                proposed["api_ui_key_id"] = auto_key["id"]
+                generated_key = _generate_api_key_entry()
+                auto_key_raw = generated_key.pop("key")
+                auto_key = generated_key
+                proposed.setdefault("api_keys", []).append(generated_key)
+                proposed["api_ui_key_id"] = generated_key["id"]
 
             save_config(proposed)
             get_config(refresh=True)
@@ -887,6 +1109,10 @@ def settings():
             lifecycle_logger.info("api_auth_updated enabled=%s", enable_api_auth)
             if auto_key:
                 lifecycle_logger.info("api_key_generated id=%s", auto_key["id"])
+                if auto_key_raw:
+                    session["last_generated_api_key"] = auto_key_raw
+                    flash(f"Generated new API key: {auto_key_raw}", "success")
+                    flash("Copy this key now! You won't be able to see it again.", "warning")
                 flash(
                     "API authentication enabled. A new key was generated automatically.",
                     "info",
@@ -896,6 +1122,7 @@ def settings():
         elif action == "generate_api_key":
             label = request.form.get("api_key_label", "").strip()
             new_key = _generate_api_key_entry(label)
+            new_key_raw = new_key.pop("key")
             proposed = deepcopy(config)
             proposed.setdefault("api_keys", []).append(new_key)
             if not proposed.get("api_ui_key_id"):
@@ -906,7 +1133,10 @@ def settings():
             refreshed = True
 
             lifecycle_logger.info("api_key_generated id=%s label=%s", new_key["id"], label or "")
-            flash(f"Generated new API key: {new_key['key']}", "success")
+            if new_key_raw:
+                session["last_generated_api_key"] = new_key_raw
+                flash(f"Generated new API key: {new_key_raw}", "success")
+                flash("Copy this key now! You won't be able to see it again.", "warning")
 
         elif action == "delete_api_key":
             key_id = request.form.get("api_key_id", "").strip()
@@ -951,10 +1181,11 @@ def settings():
             config = get_config()
         return redirect(url_for("settings"))
 
-    return render_template("settings.html", config=config, api_ui_key=get_ui_api_key(config))
+    return render_settings_page(config)
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("10 per minute")
 def login():
     config = get_config()
     if not config.get("ui_auth_enabled"):
@@ -974,11 +1205,13 @@ def login():
         if compare_digest(username, expected_username) and check_password_hash(
             password_hash, password
         ):
+            old_next = session.get("ui_next")
+            session.clear()
+            session.modified = True
             session["ui_authenticated"] = True
             session["ui_username"] = expected_username
             flash("Logged in successfully.", "success")
-            next_url = session.pop("ui_next", None)
-            return redirect(next_url or url_for("hosting"))
+            return redirect(old_next or url_for("hosting"))
 
         flash("Invalid username or password.", "error")
 
@@ -999,6 +1232,7 @@ def logout():
 @csrf.exempt
 @app.route("/fileupload", methods=["POST"])
 @require_api_auth()
+@limiter.limit("100 per hour")
 def fileupload():
     with upload_slot() as acquired:
         if not acquired:
@@ -1082,6 +1316,11 @@ def fileupload():
                     except (OSError, IOError):
                         pass
                 upload.save(str(temp_path))
+                if hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
                 temp_path.replace(upload_path)
                 size = upload_path.stat().st_size
                 if max_bytes and size > max_bytes:
@@ -1107,6 +1346,11 @@ def fileupload():
                 lifecycle_logger.exception(
                     "file_upload_failed file_id=%s filename=%s", file_id, filename
                 )
+                if hasattr(upload, "stream") and hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
                 if temp_path and temp_path.exists():
                     temp_path.unlink(missing_ok=True)
                 if upload_path and upload_path.exists():
@@ -1274,6 +1518,7 @@ def direct_download(file_id: str, filename: str):
 @csrf.exempt
 @app.route("/2.0/files/content", methods=["POST"])
 @require_api_auth("box")
+@limiter.limit("100 per hour")
 def box_upload_files():
     with upload_slot() as acquired:
         if not acquired:
@@ -1395,6 +1640,12 @@ def box_upload_files():
                     raise ValueError("file too large")
                 content_type = upload.content_type
 
+                if hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
+
                 file_id = register_file(
                     original_name=filename,
                     stored_name=stored_name,
@@ -1409,6 +1660,11 @@ def box_upload_files():
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
                     prune_empty_upload_dirs(upload_path.parent)
+                if hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
                 return _box_error(
                     "file_too_large",
                     "The uploaded file exceeds the allowed size.",
@@ -1423,6 +1679,11 @@ def box_upload_files():
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
                     prune_empty_upload_dirs(upload_path.parent)
+                if hasattr(upload.stream, "close"):
+                    try:
+                        upload.stream.close()
+                    except OSError:
+                        pass
                 return _box_error(
                     "internal_error",
                     "Failed to store uploaded file.",
@@ -1646,6 +1907,7 @@ def serve_raw_file(direct_path: str):
 @csrf.exempt
 @app.route("/s3/<bucket>", methods=["POST"])
 @require_api_auth("s3")
+@limiter.limit("100 per hour")
 def s3_multipart_upload(bucket: str):
     with upload_slot() as acquired:
         if not acquired:
@@ -1733,12 +1995,22 @@ def s3_multipart_upload(bucket: str):
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
+            if hasattr(upload.stream, "close"):
+                try:
+                    upload.stream.close()
+                except OSError:
+                    pass
         except ValueError:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
+            if hasattr(upload.stream, "close"):
+                try:
+                    upload.stream.close()
+                except OSError:
+                    pass
             return _s3_error_response(
                 "EntityTooLarge",
                 "The uploaded file exceeds the allowed size.",
@@ -1755,6 +2027,11 @@ def s3_multipart_upload(bucket: str):
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
+            if hasattr(upload.stream, "close"):
+                try:
+                    upload.stream.close()
+                except OSError:
+                    pass
             return _s3_error_response(
                 "InternalError",
                 "Failed to store uploaded file.",
@@ -1859,6 +2136,7 @@ def s3_multipart_upload(bucket: str):
 @csrf.exempt
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
 @require_api_auth("s3")
+@limiter.limit("100 per hour")
 def s3_put_object(bucket: str, key: str):
     with upload_slot() as acquired:
         if not acquired:
@@ -1908,12 +2186,22 @@ def s3_put_object(bucket: str, key: str):
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
+            if hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
         except ValueError:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
+            if hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
             return _s3_error_response(
                 "EntityTooLarge",
                 "The uploaded file exceeds the allowed size.",
@@ -1930,6 +2218,11 @@ def s3_put_object(bucket: str, key: str):
             if upload_path.exists():
                 upload_path.unlink(missing_ok=True)
                 prune_empty_upload_dirs(upload_path.parent)
+            if hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
             return _s3_error_response(
                 "InternalError",
                 "Failed to store uploaded file.",

@@ -142,6 +142,18 @@
         <button type="submit" class="button primary">Generate API Key</button>
       </form>
 
+      {% if new_api_key %}
+        <div class="alert success">
+          Copy your newly generated API key below. It will not be shown again.
+        </div>
+        <div class="api-key-value new-key-display">
+          <input type="text" id="new-api-key" value="{{ new_api_key }}" readonly />
+          <button type="button" class="button primary" onclick="copyApiKeyValue('new-api-key')">
+            📋 Copy
+          </button>
+        </div>
+      {% endif %}
+
       {% if config.api_keys %}
         <ul class="api-key-list">
           {% for key in config.api_keys %}
@@ -157,8 +169,8 @@
               </div>
               <div class="api-key-body">
                 <div class="api-key-value">
-                  <input type="password" value="{{ key.key }}" readonly data-api-key-input />
-                  <button type="button" class="button secondary" data-api-key-toggle>Show</button>
+                  <input type="text" value="••••••••••••••••" readonly disabled />
+                  <small class="api-key-hint">Key is hashed and cannot be displayed. Copy it when generated.</small>
                 </div>
               <div class="api-key-actions">
                 <form method="post" class="inline-form">
@@ -189,26 +201,30 @@
 
 {% block scripts %}
   <script>
-    document.addEventListener('DOMContentLoaded', function () {
-      document.querySelectorAll('[data-api-key-toggle]').forEach(function (button) {
-        button.addEventListener('click', function () {
-          const container = button.closest('.api-key-value');
-          if (!container) {
-            return;
-          }
-          const input = container.querySelector('[data-api-key-input]');
-          if (!input) {
-            return;
-          }
-          if (input.type === 'password') {
-            input.type = 'text';
-            button.textContent = 'Hide';
-          } else {
-            input.type = 'password';
-            button.textContent = 'Show';
-          }
-        });
-      });
-    });
+    function copyApiKeyValue(elementId) {
+      const input = document.getElementById(elementId);
+      if (!input) {
+        alert('Key not found.');
+        return;
+      }
+      input.focus();
+      input.select();
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(input.value).then(function () {
+            alert('API key copied to clipboard!');
+          }, function (err) {
+            alert('Failed to copy: ' + err);
+          });
+        } else {
+          const successful = document.execCommand('copy');
+          alert(successful ? 'API key copied to clipboard!' : 'Copy command not supported.');
+        }
+      } catch (err) {
+        alert('Failed to copy: ' + err);
+      }
+      window.getSelection().removeAllRanges();
+    }
+    window.copyApiKeyValue = copyApiKeyValue;
   </script>
 {% endblock %}

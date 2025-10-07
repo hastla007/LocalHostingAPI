@@ -581,14 +581,20 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         enable = self.client.post(
             "/settings",
             data={"action": "update_api_auth", "api_auth_enabled": "on"},
-            follow_redirects=True,
+            follow_redirects=False,
         )
-        self.assertEqual(enable.status_code, 200)
+        self.assertEqual(enable.status_code, 302)
+
+        with self.client.session_transaction() as session:
+            api_key = session.get("last_generated_api_key")
+
+        self.assertIsNotNone(api_key)
+        self.client.get(enable.headers["Location"], follow_redirects=True)
 
         config = self.storage.load_config()
         self.assertTrue(config["api_auth_enabled"])
         self.assertTrue(config["api_keys"])
-        api_key = config["api_keys"][0]["key"]
+        self.assertIn("key_hash", config["api_keys"][0])
 
         unauthorized = self.client.post(
             "/fileupload",
@@ -609,13 +615,16 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["filename"], "allowed.txt")
 
     def test_api_authentication_applies_to_s3_and_box(self):
-        self.client.post(
+        enable = self.client.post(
             "/settings",
             data={"action": "update_api_auth", "api_auth_enabled": "on"},
-            follow_redirects=True,
+            follow_redirects=False,
         )
-        config = self.storage.load_config()
-        api_key = config["api_keys"][0]["key"]
+        with self.client.session_transaction() as session:
+            api_key = session.get("last_generated_api_key")
+
+        self.assertIsNotNone(api_key)
+        self.client.get(enable.headers["Location"], follow_redirects=True)
 
         s3_unauthorized = self.client.post(
             "/s3/test-bucket",
@@ -657,12 +666,17 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         original_keys = config["api_keys"]
         self.assertTrue(original_keys)
         initial_id = original_keys[0]["id"]
+        self.assertIn("key_hash", original_keys[0])
 
-        self.client.post(
+        generate = self.client.post(
             "/settings",
             data={"action": "generate_api_key", "api_key_label": "Build Server"},
-            follow_redirects=True,
+            follow_redirects=False,
         )
+        with self.client.session_transaction() as session:
+            generated_key = session.get("last_generated_api_key")
+        self.assertIsNotNone(generated_key)
+        self.client.get(generate.headers["Location"], follow_redirects=True)
         config = self.storage.load_config()
         self.assertGreaterEqual(len(config["api_keys"]), 2)
         labelled = [entry for entry in config["api_keys"] if entry["label"] == "Build Server"]

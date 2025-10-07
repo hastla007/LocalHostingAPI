@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import time
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
@@ -109,8 +110,10 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
             for entry in raw_config.get(key):
                 if not isinstance(entry, dict):
                     continue
-                key_value = str(entry.get("key", "")).strip()
-                if not key_value:
+                key_hash = entry.get("key_hash")
+                if not key_hash and entry.get("key"):
+                    key_hash = hash_api_key(str(entry.get("key")))
+                if not key_hash or not isinstance(key_hash, str):
                     continue
                 entry_id = str(entry.get("id") or uuid.uuid4().hex)
                 try:
@@ -121,7 +124,7 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
                 cleaned_items.append(
                     {
                         "id": entry_id,
-                        "key": key_value,
+                        "key_hash": key_hash,
                         "label": label.strip(),
                         "created_at": created_at,
                     }
@@ -152,6 +155,12 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
             config["api_ui_key_id"] = ""
 
     return config
+
+
+def hash_api_key(key: str) -> str:
+    """Hash an API key using SHA-256 for persistent storage."""
+
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def ensure_directories() -> None:

@@ -60,7 +60,14 @@ Once UI auth is turned on, visits to `/hosting`, `/upload-a-file`, `/logs`, `/ap
 
 REST endpoints (`/fileupload`, the S3-compatible routes, and the Box-compatible routes) accept requests without credentials by default. You can require API keys from the settings page by toggling **Require API keys for upload endpoints**. The dashboard lets you generate, delete, and label keys, and you can designate one key as the “Dashboard Default” so browser uploads continue to work without manual input.
 
+Keys are stored as SHA-256 hashes and are displayed only once—immediately after creation. The settings page surfaces the newly generated value with a copy-to-clipboard control; existing keys show masked placeholders so the raw secret is never exposed again.
+
 When API authentication is enabled, clients must send the key in an `X-API-Key` header (or `Authorization: Bearer <key>`). The same header works across the native, S3, and Box endpoints; you can also supply a simple `api_key` query parameter for tooling that cannot set headers. Rotate or revoke keys at any time—changes take effect immediately.
+
+### Operational endpoints and safeguards
+
+- A lightweight health check is available at `GET /health`. It verifies the SQLite connection and reports free disk space (in gigabytes) so container orchestrators can probe the service and alert on unhealthy states.
+- Rate limiting is enabled by default through [Flask-Limiter](https://flask-limiter.readthedocs.io/) with conservative caps (`10/min` for the login page and `100/hour` for upload APIs). Adjust `LOCALHOSTING_RATE_LIMIT_STORAGE` if you need a persistent backend for rate limit counters.
 
 ## Project Structure
 
@@ -100,6 +107,7 @@ Additional runtime tunables include:
 | `MAX_UPLOAD_SIZE_MB` | Maximum request payload size accepted by the upload endpoints (defaults to 500 MB). |
 | `LOCALHOSTING_MAX_CONCURRENT_UPLOADS` | Upper bound on simultaneous uploads processed across the UI, native API, Box, and S3-compatible endpoints (defaults to 10). |
 | `SECRET_KEY` | Optional Flask secret key override; when unset a random key is generated and stored in `data/.secret_key` on first launch. |
+| `LOCALHOSTING_RATE_LIMIT_STORAGE` | Optional Flask-Limiter storage URI (defaults to in-memory `memory://`). |
 
 ## Development
 
