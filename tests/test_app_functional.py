@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -174,6 +175,18 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Upload a File", response.data)
 
+    def test_api_docs_page_lists_box_examples(self):
+        response = self.client.get("/api-docs")
+        self.assertEqual(response.status_code, 200)
+        html = response.data.decode()
+        self.assertIn("Box API", html)
+        self.assertIn("Sample JSON Response", html)
+
+    def test_settings_page_renders_form(self):
+        response = self.client.get("/settings")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Retention Settings", response.data)
+
     def test_index_redirects_to_hosting(self):
         response = self.client.get("/", follow_redirects=False)
         self.assertIn(response.status_code, {301, 302, 307, 308})
@@ -200,6 +213,38 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
         self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
+
+    def test_cleanup_removes_expired_files_without_request(self):
+        upload_response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"expire later"), "expire-later.txt"),
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload_response.status_code, 201)
+        payload = upload_response.get_json()
+        file_id = payload["id"]
+
+        with self.storage.get_db() as conn:
+            conn.execute(
+                "UPDATE files SET expires_at = ? WHERE id = ?",
+                (time.time() - 10, file_id),
+            )
+            conn.commit()
+
+        uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
+        stored_files = list(uploads_dir.rglob("*"))
+        self.assertTrue(any(path.is_file() for path in stored_files))
+
+        removed = self.storage.cleanup_expired_files()
+        self.assertEqual(removed, 1)
+
+        # All stored files should be gone after cleanup.
+        self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
+        record = self.storage.get_file(file_id)
+        self.assertIsNone(record)
 
     def test_delete_route_missing_file_shows_error(self):
         response = self.client.post(
