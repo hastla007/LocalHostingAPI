@@ -18,6 +18,41 @@ from secrets import compare_digest
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlencode as _compat_urlencode
+
+try:
+    import werkzeug.urls as _werkzeug_urls
+
+    if not hasattr(_werkzeug_urls, "url_encode"):
+
+        def _url_encode_compat(params: Any, charset: str = "utf-8", sort: bool = False) -> str:
+            """Compatibility shim for Flask-WTF on Werkzeug >= 3.0."""
+
+            if params is None:
+                return ""
+
+            if hasattr(params, "items"):
+                iterable = params.items()
+            else:
+                iterable = params
+
+            items: List[tuple[str, Any]] = []
+            for key, value in iterable:
+                key_str = str(key)
+                if isinstance(value, (list, tuple, set)):
+                    for member in value:
+                        items.append((key_str, "" if member is None else str(member)))
+                else:
+                    items.append((key_str, "" if value is None else str(value)))
+
+            if sort:
+                items.sort(key=lambda item: item[0])
+
+            return _compat_urlencode(items, doseq=True)
+
+        _werkzeug_urls.url_encode = _url_encode_compat  # type: ignore[assignment]
+except Exception:  # pragma: no cover - defensive best-effort shim
+    pass
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
