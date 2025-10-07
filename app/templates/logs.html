@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card logs-page">
+    <div class="logs-header">
+      <div>
+        <h2>Application Logs</h2>
+        <p class="logs-subtitle">Review container output and upload lifecycle events. Showing up to {{ log_payload.max_lines }} lines per source.</p>
+      </div>
+      <div class="logs-source-picker">
+        <label for="log-source" class="sr-only">Log Source</label>
+        <select id="log-source" name="source">
+          {% for source in sources %}
+            <option value="{{ source.id }}" {% if source.id == selected_source %}selected{% endif %}>{{ source.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="log-controls" role="group" aria-label="Log controls">
+      <button type="button" class="button secondary" id="log-refresh">
+        <span class="icon">⟳</span>
+        <span class="label">Manual Refresh</span>
+      </button>
+      <div class="auto-buttons" role="group" aria-label="Auto refresh intervals">
+        <button type="button" class="button ghost" data-auto-interval="5">Auto 5s</button>
+        <button type="button" class="button ghost" data-auto-interval="10">Auto 10s</button>
+        <button type="button" class="button ghost" data-auto-interval="30">Auto 30s</button>
+      </div>
+      <div class="auto-status" id="auto-status">Auto-refresh: OFF</div>
+    </div>
+
+    <dl class="log-meta">
+      <div>
+        <dt>Source</dt>
+        <dd id="log-source-label">{{ log_payload.label }}</dd>
+      </div>
+      <div>
+        <dt>Last updated</dt>
+        <dd id="log-updated">{{ log_payload.generated_at_iso }}</dd>
+      </div>
+      <div>
+        <dt>Last modified</dt>
+        <dd id="log-modified">{{ log_payload.last_modified_iso if log_payload.last_modified_iso else '—' }}</dd>
+      </div>
+      <div>
+        <dt>Size</dt>
+        <dd id="log-size">{% if log_payload.size_bytes is defined %}{{ log_payload.size_bytes | human_filesize }}{% else %}—{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Lines loaded</dt>
+        <dd id="log-line-count">{{ log_payload.line_count }}</dd>
+      </div>
+    </dl>
+
+    <p class="log-description" id="log-description">{{ log_payload.description }}</p>
+
+    <div class="log-viewer" id="log-output" data-endpoint="{{ url_for('logs_data') }}">
+      {% if log_payload.available %}
+        <pre id="log-pre">{{ log_payload.text | e }}</pre>
+      {% else %}
+        <div class="log-empty" id="log-empty">{{ log_payload.message }}</div>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+    (() => {
+      const endpoint = document.getElementById('log-output').dataset.endpoint;
+      const sourceSelect = document.getElementById('log-source');
+      const refreshButton = document.getElementById('log-refresh');
+      const autoButtons = document.querySelectorAll('[data-auto-interval]');
+      const autoStatus = document.getElementById('auto-status');
+      const logOutput = document.getElementById('log-output');
+      const sourceLabel = document.getElementById('log-source-label');
+      const updatedLabel = document.getElementById('log-updated');
+      const modifiedLabel = document.getElementById('log-modified');
+      const sizeLabel = document.getElementById('log-size');
+      const lineCountLabel = document.getElementById('log-line-count');
+      const descriptionLabel = document.getElementById('log-description');
+
+      let autoTimer = null;
+      let activeInterval = null;
+
+      const clearAuto = () => {
+        if (autoTimer) {
+          window.clearInterval(autoTimer);
+          autoTimer = null;
+        }
+        activeInterval = null;
+        autoButtons.forEach((button) => button.classList.remove('active'));
+        autoStatus.textContent = 'Auto-refresh: OFF';
+      };
+
+      const setAuto = (intervalSeconds, button) => {
+        if (activeInterval === intervalSeconds) {
+          clearAuto();
+          return;
+        }
+        clearAuto();
+        activeInterval = intervalSeconds;
+        button.classList.add('active');
+        autoStatus.textContent = `Auto-refresh: every ${intervalSeconds}s`;
+        autoTimer = window.setInterval(fetchLogs, intervalSeconds * 1000);
+      };
+
+      const renderPayload = (payload) => {
+        sourceLabel.textContent = payload.label;
+        updatedLabel.textContent = payload.generated_at_iso;
+        modifiedLabel.textContent = payload.last_modified_iso || '—';
+        sizeLabel.textContent = payload.size_human || '—';
+        lineCountLabel.textContent = payload.line_count;
+        if (descriptionLabel) {
+          descriptionLabel.textContent = payload.description || '';
+        }
+
+        const currentPre = logOutput.querySelector('#log-pre');
+        const currentEmpty = logOutput.querySelector('#log-empty');
+
+        if (payload.available) {
+          if (currentEmpty) {
+            currentEmpty.remove();
+          }
+          const pre = currentPre || document.createElement('pre');
+          pre.id = 'log-pre';
+          pre.textContent = payload.text;
+          if (!currentPre) {
+            logOutput.innerHTML = '';
+            logOutput.appendChild(pre);
+          }
+          logOutput.scrollTop = logOutput.scrollHeight;
+        } else {
+          if (currentPre) {
+            currentPre.remove();
+          }
+          const message = payload.message || 'Log file is not available yet.';
+          const placeholder = currentEmpty || document.createElement('div');
+          placeholder.id = 'log-empty';
+          placeholder.className = 'log-empty';
+          placeholder.textContent = message;
+          if (!currentEmpty) {
+            logOutput.innerHTML = '';
+            logOutput.appendChild(placeholder);
+          }
+        }
+      };
+
+      const fetchLogs = async () => {
+        const params = new URLSearchParams({ source: sourceSelect.value });
+        try {
+          const response = await fetch(`${endpoint}?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
+          if (!response.ok) {
+            throw new Error(`Failed to load logs: ${response.status}`);
+          }
+          const payload = await response.json();
+          renderPayload(payload);
+        } catch (error) {
+          console.error(error);
+          autoStatus.textContent = 'Auto-refresh: error fetching logs';
+        }
+      };
+
+      refreshButton.addEventListener('click', fetchLogs);
+      sourceSelect.addEventListener('change', () => {
+        clearAuto();
+        fetchLogs();
+      });
+
+      autoButtons.forEach((button) => {
+        button.addEventListener('click', () => setAuto(Number(button.dataset.autoInterval), button));
+      });
+    })();
+  </script>
+{% endblock %}
