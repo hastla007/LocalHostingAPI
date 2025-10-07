@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>Retention Settings</h2>
+    <form method="post" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_retention" />
+      <label for="retention_min_hours">Minimum retention (hours)</label>
+      <input
+        type="number"
+        id="retention_min_hours"
+        name="retention_min_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_min_hours }}"
+        required
+      />
+
+      <label for="retention_max_hours">Maximum retention (hours)</label>
+      <input
+        type="number"
+        id="retention_max_hours"
+        name="retention_max_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_max_hours }}"
+        required
+      />
+
+      <label for="retention_hours">Default retention (hours)</label>
+      <input
+        type="number"
+        id="retention_hours"
+        name="retention_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_hours }}"
+        required
+      />
+
+      <button type="submit" class="button primary">Save</button>
+    </form>
+    <p>
+      Each upload can now request its own retention period within the allowed range. Values outside of the configured bounds will be
+      rejected by the API and the dashboard uploader.
+    </p>
+  </section>
+  <section class="card">
+    <h2>UI Authentication</h2>
+    <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_ui_auth" />
+
+      <label for="ui_auth_enabled" class="checkbox-label">
+        <input
+          type="checkbox"
+          id="ui_auth_enabled"
+          name="ui_auth_enabled"
+          {% if config.ui_auth_enabled %}checked{% endif %}
+        />
+        Require login for dashboard pages
+      </label>
+
+      <label for="ui_username">Username</label>
+      <input
+        type="text"
+        id="ui_username"
+        name="ui_username"
+        value="{{ config.ui_username }}"
+        autocomplete="username"
+      />
+
+      <label for="ui_password">New password</label>
+      <input
+        type="password"
+        id="ui_password"
+        name="ui_password"
+        autocomplete="new-password"
+        placeholder="Leave blank to keep current password"
+      />
+
+      <label for="ui_password_confirm">Confirm password</label>
+      <input
+        type="password"
+        id="ui_password_confirm"
+        name="ui_password_confirm"
+        autocomplete="new-password"
+        placeholder="Repeat new password"
+      />
+
+      <p class="form-help">
+        Authentication is optional by default. Enable it to require users to log in before accessing the dashboard. Leave the
+        password fields blank to keep the existing password.
+      </p>
+
+      <button type="submit" class="button primary">Update Authentication</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>API Authentication</h2>
+    <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_api_auth" />
+
+      <label for="api_auth_enabled" class="checkbox-label">
+        <input
+          type="checkbox"
+          id="api_auth_enabled"
+          name="api_auth_enabled"
+          {% if config.api_auth_enabled %}checked{% endif %}
+        />
+        Require API keys for upload endpoints
+      </label>
+
+      <p class="form-help">
+        When enabled, API clients must provide a valid key using the <code>X-API-Key</code> header (or
+        <code>Authorization: Bearer</code>) when calling upload and download endpoints. Keys are managed below.
+      </p>
+
+      {% if config.api_auth_enabled and not api_ui_key %}
+        <p class="form-help warning">
+          Dashboard uploads currently do not have an assigned API key. Set a key as the dashboard default below to continue
+          uploading from the browser.
+        </p>
+      {% endif %}
+
+      <button type="submit" class="button primary">Update API Authentication</button>
+    </form>
+
+    <div class="api-key-management">
+      <h3>API Keys</h3>
+      <form method="post" class="generate-key-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="action" value="generate_api_key" />
+        <label for="api_key_label">Label (optional)</label>
+        <input
+          type="text"
+          id="api_key_label"
+          name="api_key_label"
+          placeholder="Describe this key (e.g., Build Server)"
+        />
+        <button type="submit" class="button primary">Generate API Key</button>
+      </form>
+
+      {% if config.api_keys %}
+        <ul class="api-key-list">
+          {% for key in config.api_keys %}
+          <li class="api-key-item">
+            <div class="api-key-header">
+                <div>
+                  <span class="api-key-label">{{ key.label or 'Key ' ~ loop.index }}</span>
+                  {% if api_ui_key and api_ui_key.id == key.id %}
+                    <span class="badge">Dashboard Default</span>
+                  {% endif %}
+                </div>
+                <span class="api-key-created">Created {{ key.created_at|human_datetime }}</span>
+              </div>
+              <div class="api-key-body">
+                <div class="api-key-value">
+                  <input type="password" value="{{ key.key }}" readonly data-api-key-input />
+                  <button type="button" class="button secondary" data-api-key-toggle>Show</button>
+                </div>
+              <div class="api-key-actions">
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="set_primary_api_key" />
+                    <input type="hidden" name="api_key_id" value="{{ key.id }}" />
+                    <button type="submit" class="button secondary" {% if api_ui_key and api_ui_key.id == key.id %}disabled{% endif %}>
+                      Use for Dashboard
+                    </button>
+                  </form>
+                <form method="post" class="inline-form" onsubmit="return confirm('Delete this API key? This action cannot be undone.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="delete_api_key" />
+                    <input type="hidden" name="api_key_id" value="{{ key.id }}" />
+                    <button type="submit" class="button danger">Delete</button>
+                  </form>
+                </div>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="form-help">No API keys have been created yet.</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      document.querySelectorAll('[data-api-key-toggle]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          const container = button.closest('.api-key-value');
+          if (!container) {
+            return;
+          }
+          const input = container.querySelector('[data-api-key-input]');
+          if (!input) {
+            return;
+          }
+          if (input.type === 'password') {
+            input.type = 'text';
+            button.textContent = 'Hide';
+          } else {
+            input.type = 'password';
+            button.textContent = 'Show';
+          }
+        });
+      });
+    });
+  </script>
+{% endblock %}
