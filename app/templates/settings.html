@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>Retention Settings</h2>
+    <form method="post" class="form-grid">
+      <label for="retention_min_hours">Minimum retention (hours)</label>
+      <input
+        type="number"
+        id="retention_min_hours"
+        name="retention_min_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_min_hours }}"
+        required
+      />
+
+      <label for="retention_max_hours">Maximum retention (hours)</label>
+      <input
+        type="number"
+        id="retention_max_hours"
+        name="retention_max_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_max_hours }}"
+        required
+      />
+
+      <label for="retention_hours">Default retention (hours)</label>
+      <input
+        type="number"
+        id="retention_hours"
+        name="retention_hours"
+        min="0"
+        step="0.1"
+        value="{{ config.retention_hours }}"
+        required
+      />
+
+      <button type="submit" class="button primary">Save</button>
+    </form>
+    <p>
+      Each upload can now request its own retention period within the allowed range. Values outside of the configured bounds will be
+      rejected by the API and the dashboard uploader.
+    </p>
+  </section>
+{% endblock %}
