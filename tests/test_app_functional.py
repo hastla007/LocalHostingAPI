@@ -15,6 +15,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         os.environ["LOCALHOSTING_STORAGE_ROOT"] = str(root)
         os.environ["LOCALHOSTING_DATA_DIR"] = str(root / "data")
         os.environ["LOCALHOSTING_UPLOADS_DIR"] = str(root / "uploads")
+        os.environ["LOCALHOSTING_LOGS_DIR"] = str(root / "logs")
         self._reload_app()
         self.app.config.update(TESTING=True)
         self.client = self.app.test_client()
@@ -25,6 +26,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             "LOCALHOSTING_STORAGE_ROOT",
             "LOCALHOSTING_DATA_DIR",
             "LOCALHOSTING_UPLOADS_DIR",
+            "LOCALHOSTING_LOGS_DIR",
+            "LOCALHOSTING_DOCKER_LOG_PATH",
         ]:
             os.environ.pop(key, None)
         for module in ["app.app", "app.storage", "app"]:
@@ -167,6 +170,23 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Upload a File", response.data)
 
+    def test_logs_page_renders_and_returns_payload(self):
+        with self.app.app_context():
+            self.app.logger.info("integration log entry")
+            for handler in self.app.logger.handlers:
+                handler.flush()
+
+        response = self.client.get("/logs")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Application Logs", response.data)
+
+        data_response = self.client.get("/logs/data")
+        self.assertEqual(data_response.status_code, 200)
+        payload = data_response.get_json()
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["source"], "application")
+        self.assertIn("log entry", payload.get("text", ""))
+
     def test_s3_post_upload_flow(self):
         response = self.client.post(
             "/s3/example-bucket",
@@ -268,6 +288,26 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         if s3_put_record["direct_path"]:
             self.assertIn(f"href=\"/{s3_put_record['direct_path']}\"", html)
+
+    def test_logs_supports_docker_source_when_configured(self):
+        logs_dir = Path(os.environ["LOCALHOSTING_LOGS_DIR"])
+        docker_log = logs_dir / "container.log"
+        docker_log.parent.mkdir(parents=True, exist_ok=True)
+        docker_log.write_text("docker test line\n", encoding="utf-8")
+        os.environ["LOCALHOSTING_DOCKER_LOG_PATH"] = str(docker_log)
+
+        self._reload_app()
+        self.app.config.update(TESTING=True)
+        self.client = self.app.test_client()
+
+        response = self.client.get("/logs?source=docker")
+        self.assertEqual(response.status_code, 200)
+
+        data_response = self.client.get("/logs/data?source=docker")
+        self.assertEqual(data_response.status_code, 200)
+        payload = data_response.get_json()
+        self.assertEqual(payload["source"], "docker")
+        self.assertIn("docker test line", payload.get("text", ""))
 
     def test_s3_put_upload_flow(self):
         response = self.client.put(

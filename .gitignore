@@ -11,6 +11,7 @@ ENV/
 # Local data directories created at runtime
 app/uploads/
 app/data/
+app/logs/
 
 # SQLite databases
 *.db

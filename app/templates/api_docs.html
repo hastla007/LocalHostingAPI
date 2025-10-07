@@ -150,4 +150,13 @@
       To upload from a browser, visit <a href="{{ url_for('upload_file_page') }}">Upload File</a> for the drag-and-drop workflow.
     </p>
   </section>
+
+  <section class="card">
+    <h2>Monitoring &amp; Logs</h2>
+    <p>
+      The <a href="{{ url_for('logs_page') }}">Logs</a> page streams the latest application output, including upload and download lifecycle entries.
+      Use the manual refresh button or enable one of the automatic polling intervals to keep the view up to date. If you expose a Docker log file via
+      the <code>LOCALHOSTING_DOCKER_LOG_PATH</code> environment variable, it will appear alongside the built-in application log.
+    </p>
+  </section>
 {% endblock %}

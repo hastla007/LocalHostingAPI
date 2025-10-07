@@ -199,6 +199,192 @@ main {
   display: inline;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.logs-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.logs-header h2 {
+  margin: 0;
+}
+
+.logs-subtitle {
+  margin: 0.35rem 0 0;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.logs-source-picker select {
+  background: #1f2933;
+  color: #fff;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.logs-source-picker select:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.auto-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.button.ghost {
+  background: transparent;
+  color: #1f2933;
+  border: 1px solid #cbd2d9;
+}
+
+.button.ghost:hover,
+.button.ghost:focus-visible,
+.button.ghost.active {
+  background: #1f2933;
+  color: #fff;
+}
+
+.auto-status {
+  font-size: 0.85rem;
+  color: #475569;
+  padding-left: 0.5rem;
+}
+
+.log-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+}
+
+.log-meta div {
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.log-meta dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  margin: 0 0 0.25rem;
+}
+
+.log-meta dd {
+  margin: 0;
+  font-weight: 600;
+  color: #111827;
+}
+
+.log-description {
+  margin: 0;
+  color: #4b5563;
+  font-size: 0.9rem;
+}
+
+.log-viewer {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #1e293b;
+  padding: 1rem;
+  min-height: 320px;
+  max-height: 420px;
+  overflow-y: auto;
+  font-family: "Fira Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.log-viewer pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-empty {
+  color: #e2e8f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #0f172a;
+    color: #e2e8f0;
+  }
+
+  .card {
+    background: #111c30;
+    box-shadow: 0 2px 12px rgba(15, 23, 42, 0.35);
+  }
+
+  .logs-subtitle {
+    color: #cbd5f5;
+  }
+
+  .log-meta div {
+    background: #1e293b;
+  }
+
+  .log-meta dt {
+    color: #a5b4fc;
+  }
+
+  .log-meta dd {
+    color: #e2e8f0;
+  }
+
+  .log-description {
+    color: #cbd5f5;
+  }
+
+  .button.ghost {
+    color: #e2e8f0;
+    border-color: #334155;
+  }
+
+  .button.ghost:hover,
+  .button.ghost:focus-visible,
+  .button.ghost.active {
+    background: #2563eb;
+    color: #fff;
+  }
+
+  .auto-status {
+    color: #cbd5f5;
+  }
+}
+
 .flash-messages {
   list-style: none;
   padding: 0;

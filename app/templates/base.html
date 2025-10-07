@@ -16,6 +16,7 @@
       </h1>
       <nav>
         <a href="{{ url_for('hosting') }}" class="{{ 'active' if request.endpoint == 'hosting' else '' }}">Hosting</a>
+        <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint in ('logs_page', 'logs_data') else '' }}">Logs</a>
         <a href="{{ url_for('upload_file_page') }}" class="{{ 'active' if request.endpoint == 'upload_file_page' else '' }}">Upload File</a>
         <a href="{{ url_for('api_docs') }}" class="{{ 'active' if request.endpoint == 'api_docs' else '' }}">API Docs</a>
         <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' else '' }}">Settings</a>

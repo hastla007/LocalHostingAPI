@@ -3,10 +3,13 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from datetime import datetime
+from pathlib import Path
 from secrets import compare_digest
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
+from logging.handlers import RotatingFileHandler
 
 from flask import (
     Flask,
@@ -25,6 +28,7 @@ from werkzeug.utils import secure_filename
 
 from .storage import (
     UPLOADS_DIR,
+    LOGS_DIR,
     cleanup_expired_files,
     delete_file,
     get_file,
@@ -35,6 +39,7 @@ from .storage import (
     register_file,
     RESERVED_DIRECT_PATHS,
     save_config,
+    ensure_directories,
 )
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -43,6 +48,140 @@ logging.basicConfig(
     level=numeric_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
+
+def _configure_file_logging() -> Path:
+    """Attach a rotating file handler for application and lifecycle logs."""
+
+    ensure_directories()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOGS_DIR / "application.log"
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    for handler in root_logger.handlers:
+        if isinstance(handler, RotatingFileHandler) and getattr(handler, "baseFilename", "") == str(log_path):
+            handler.setLevel(numeric_level)
+            handler.setFormatter(formatter)
+            return log_path
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(numeric_level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    return log_path
+
+
+APP_LOG_PATH = _configure_file_logging()
+MAX_LOG_LINES = int(os.environ.get("LOCALHOSTING_LOG_MAX_LINES", "1000"))
+
+
+def _resolve_docker_log_path() -> Optional[Path]:
+    candidate = os.environ.get("LOCALHOSTING_DOCKER_LOG_PATH")
+    if candidate:
+        return Path(candidate).expanduser()
+
+    fallback = LOGS_DIR / "docker.log"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def _get_log_sources() -> List[dict]:
+    sources: List[dict] = [
+        {
+            "id": "application",
+            "label": "Application & Uploads",
+            "description": "Combined application output including upload lifecycle events.",
+            "path": APP_LOG_PATH,
+        }
+    ]
+
+    docker_path = _resolve_docker_log_path()
+    if docker_path and docker_path != APP_LOG_PATH:
+        sources.append(
+            {
+                "id": "docker",
+                "label": "Docker Container",
+                "description": "Tail of the Docker container logs (if provided).",
+                "path": docker_path,
+            }
+        )
+
+    return sources
+
+
+def _load_log_payload(source: dict, *, max_lines: int = MAX_LOG_LINES) -> dict:
+    path: Path = source["path"]
+    try:
+        stat = path.stat()
+        available = True
+    except FileNotFoundError:
+        available = False
+        stat = None
+
+    text = ""
+    line_count = 0
+    if available:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                buffer = deque(handle, maxlen=max_lines)
+        except OSError:
+            available = False
+            buffer = deque()
+        else:
+            line_count = len(buffer)
+            text = "".join(buffer)
+
+    payload = {
+        "available": available,
+        "line_count": line_count,
+        "text": text,
+        "path": str(path),
+    }
+
+    if stat is not None:
+        payload.update(
+            {
+                "size_bytes": stat.st_size,
+                "last_modified": stat.st_mtime,
+                "last_modified_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            }
+        )
+
+    if not available:
+        payload["message"] = "Log file is not available yet."
+
+    return payload
+
+
+def _select_log_source(source_id: Optional[str]) -> tuple[dict, List[dict]]:
+    sources = _get_log_sources()
+    selected = next((entry for entry in sources if entry["id"] == source_id), sources[0])
+    return selected, sources
+
+
+def _build_log_response(source: dict) -> dict:
+    payload = _load_log_payload(source)
+    generated_at = time.time()
+    if payload.get("size_bytes") is not None:
+        payload["size_human"] = human_filesize(int(payload["size_bytes"]))
+    payload.update(
+        {
+            "source": source["id"],
+            "label": source["label"],
+            "description": source["description"],
+            "generated_at": generated_at,
+            "generated_at_iso": datetime.utcfromtimestamp(generated_at).isoformat() + "Z",
+            "max_lines": MAX_LOG_LINES,
+        }
+    )
+    return payload
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "localhostingapi-secret")
@@ -231,6 +370,28 @@ def upload_file_page():
 def api_docs():
     config = load_config()
     return render_template("api_docs.html", config=config)
+
+
+@app.route("/logs")
+def logs_page():
+    source_id = request.args.get("source")
+    selected, sources = _select_log_source(source_id)
+    payload = _build_log_response(selected)
+    return render_template(
+        "logs.html",
+        title="Logs",
+        sources=sources,
+        selected_source=selected["id"],
+        log_payload=payload,
+    )
+
+
+@app.route("/logs/data")
+def logs_data():
+    source_id = request.args.get("source")
+    selected, _ = _select_log_source(source_id)
+    payload = _build_log_response(selected)
+    return jsonify(payload)
 
 
 @app.route("/hosting/delete/<file_id>", methods=["POST"])

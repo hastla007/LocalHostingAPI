@@ -9,6 +9,7 @@ Local Hosting API is a lightweight self-hosted file upload service designed for 
 - **Web dashboard** – Browse uploads at `/hosting`, download files, remove them manually, and track expiration details. Use `/upload-a-file` for the drag-and-drop uploader with retention controls.
 - **Shareable download links** – Retrieve classic ID-based URLs, direct links that embed the original filename, or raw filename-only URLs for inline streaming.
 - **API documentation** – Review example requests and responses at `/api-docs`.
+- **Live log viewer** – Monitor container output and upload lifecycle events from `/logs`, including manual refresh and automatic polling controls.
 - **Configurable retention** – Adjust how long files stay available via the `/settings` page, including minimum/maximum bounds that callers must respect. Expired files are cleaned up automatically.
 - **Lifecycle logging** – Every upload, download, deletion, and cleanup task is logged for easier auditing and troubleshooting.
 - **Durable storage** – Files and metadata persist across restarts using Docker volumes.
@@ -53,7 +54,7 @@ Visit <http://localhost:8000/settings> to update the retention policy. You can d
 └── README.md
 ```
 
-Uploads are stored in `app/uploads` and metadata/configuration lives in `app/data`. Both directories are mapped to Docker volumes to survive container restarts.
+Uploads are stored in `app/uploads`, metadata/configuration lives in `app/data`, and rolling log files are written to `app/logs`. All directories are mapped to Docker volumes to survive container restarts.
 
 ### Customising storage locations
 
@@ -64,6 +65,8 @@ If you need to relocate persisted data (for example when running the test suite 
 | `LOCALHOSTING_STORAGE_ROOT` | Base directory used for derived paths when the more specific variables below are not provided. |
 | `LOCALHOSTING_DATA_DIR` | Folder that stores the SQLite database and configuration file. |
 | `LOCALHOSTING_UPLOADS_DIR` | Folder where uploaded files are written. |
+| `LOCALHOSTING_LOGS_DIR` | Folder where application log files are persisted. |
+| `LOCALHOSTING_DOCKER_LOG_PATH` | Optional path to an external Docker log file to expose in the `/logs` viewer. |
 
 Each variable accepts absolute or relative paths. When unset, the application defaults to the in-repo `app/data` and `app/uploads` directories.
 

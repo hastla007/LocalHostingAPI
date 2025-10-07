@@ -25,6 +25,7 @@ def _resolve_env_path(env_key: str, default: Path) -> Path:
 STORAGE_ROOT = _resolve_env_path("LOCALHOSTING_STORAGE_ROOT", BASE_DIR)
 DATA_DIR = _resolve_env_path("LOCALHOSTING_DATA_DIR", STORAGE_ROOT / "data")
 UPLOADS_DIR = _resolve_env_path("LOCALHOSTING_UPLOADS_DIR", STORAGE_ROOT / "uploads")
+LOGS_DIR = _resolve_env_path("LOCALHOSTING_LOGS_DIR", STORAGE_ROOT / "logs")
 DB_PATH = DATA_DIR / "files.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
@@ -74,6 +75,7 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
 def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_db() -> sqlite3.Connection:
@@ -91,6 +93,7 @@ RESERVED_DIRECT_PATHS = {
     "fileupload",
     "static",
     "files",
+    "logs",
     "uploads",
     "data",
     "favicon.ico",
