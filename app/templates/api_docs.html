@@ -46,6 +46,46 @@
   </section>
 
   <section class="card">
+    <h2>S3-Compatible Uploads</h2>
+    <p>
+      The Local Hosting API exposes lightweight Amazon S3 style endpoints for drop-in compatibility with tooling that expects
+      object storage semantics.
+    </p>
+    <h3>POST Form Upload</h3>
+    <p><strong>Endpoint:</strong> <code>POST /s3/&lt;bucket&gt;</code></p>
+    <p>
+      Send a multipart form submission that includes the standard S3 fields such as <code>key</code> and <code>file</code>. Optional
+      retention can be provided with the custom field <code>x-amz-meta-retention-hours</code>.
+    </p>
+    <pre><code>curl -X POST \
+  -F "key=uploads/${filename}" \
+  -F "x-amz-meta-retention-hours=12" \
+  -F "file=@/path/to/your/file.txt" \
+  {{ request.url_root.rstrip('/') }}/s3/example-bucket</code></pre>
+    <p>
+      Successful uploads return <code>201 Created</code> with an XML payload mirroring S3&rsquo;s <code>&lt;PostResponse&gt;</code>
+      including the resolved object location, key, and ETag. The <code>x-localhosting-file-id</code> header exposes the internal
+      identifier so you can still reach the classic download endpoints if needed.
+    </p>
+
+    <h3>PUT Object Upload</h3>
+    <p><strong>Endpoint:</strong> <code>PUT /s3/&lt;bucket&gt;/&lt;key&gt;</code></p>
+    <p>
+      Issue a raw PUT with the file contents in the request body. Custom retention is accepted through the
+      <code>X-Amz-Meta-Retention-Hours</code> header or a <code>retentionHours</code> query parameter.
+    </p>
+    <pre><code>curl -X PUT \
+  -H "Content-Type: video/mp4" \
+  -H "X-Amz-Meta-Retention-Hours: 24" \
+  --data-binary @movie.mp4 \
+  {{ request.url_root.rstrip('/') }}/s3/example-bucket/media/movie.mp4</code></pre>
+    <p>
+      A successful PUT returns <code>200 OK</code> with an S3-style <code>&lt;PutObjectResult&gt;</code> XML body alongside the generated
+      ETag and object location headers.
+    </p>
+  </section>
+
+  <section class="card">
     <h2>Download a File</h2>
     <p><strong>Endpoint:</strong> <code>GET /download/&lt;id&gt;</code></p>
     <p>Use the <code>download_url</code> returned during upload or substitute the file ID:</p>

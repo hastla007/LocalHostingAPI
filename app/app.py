@@ -1,15 +1,20 @@
+import hashlib
 import logging
 import os
 import time
 import uuid
 from datetime import datetime
 from secrets import compare_digest
+from typing import Iterable, Optional
+from xml.etree.ElementTree import Element, SubElement, tostring
 
 from flask import (
     Flask,
     abort,
     flash,
     jsonify,
+    make_response,
+    Response,
     redirect,
     render_template,
     request,
@@ -44,6 +49,107 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "localhostingapi-secret"
 app.logger.setLevel(numeric_level)
 
 lifecycle_logger = logging.getLogger("localhosting.lifecycle")
+
+
+class RetentionValidationError(ValueError):
+    """Raised when a requested retention period is invalid."""
+
+    def __init__(self, message: str, allowed_range: Optional[Iterable[float]] = None):
+        super().__init__(message)
+        self.allowed_range = list(allowed_range) if allowed_range is not None else None
+
+    def to_payload(self) -> dict:
+        payload = {"error": str(self)}
+        if self.allowed_range is not None:
+            payload["allowed_range"] = self.allowed_range
+        return payload
+
+
+def resolve_retention(config: dict, *candidates: Optional[str]) -> float:
+    """Resolve and validate a retention value from the provided candidates."""
+
+    chosen: Optional[str] = None
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            chosen = candidate
+            break
+
+    if chosen is None:
+        return config.get("retention_hours", 24.0)
+
+    allowed_range = (
+        config.get("retention_min_hours", 0.0),
+        config.get("retention_max_hours", config.get("retention_hours", 24.0)),
+    )
+
+    try:
+        retention = float(chosen)
+    except (TypeError, ValueError) as error:
+        raise RetentionValidationError(
+            "Invalid retention_hours value",
+            allowed_range=allowed_range,
+        ) from error
+
+    if not (allowed_range[0] <= retention <= allowed_range[1]):
+        raise RetentionValidationError(
+            "Retention must be within the configured range.",
+            allowed_range=allowed_range,
+        )
+
+    return retention
+
+
+def _s3_error_response(
+    code: str,
+    message: str,
+    *,
+    status_code: int = 400,
+    bucket: Optional[str] = None,
+    key: Optional[str] = None,
+) -> Response:
+    root = Element("Error")
+    SubElement(root, "Code").text = code
+    SubElement(root, "Message").text = message
+    if bucket is not None:
+        SubElement(root, "BucketName").text = bucket
+    if key is not None:
+        SubElement(root, "Key").text = key
+
+    payload = tostring(root, encoding="utf-8")
+    response = make_response(payload, status_code)
+    response.mimetype = "application/xml"
+    response.headers["x-amz-request-id"] = uuid.uuid4().hex
+    return response
+
+
+def _build_s3_post_success(bucket: str, key: str, location: str, etag: str):
+    root = Element("PostResponse")
+    SubElement(root, "Location").text = location
+    SubElement(root, "Bucket").text = bucket
+    SubElement(root, "Key").text = key
+    SubElement(root, "ETag").text = f'"{etag}"'
+    payload = tostring(root, encoding="utf-8")
+    response = make_response(payload, 201)
+    response.mimetype = "application/xml"
+    response.headers["ETag"] = f'"{etag}"'
+    response.headers["Location"] = location
+    response.headers["x-amz-request-id"] = uuid.uuid4().hex
+    return response
+
+
+def _build_s3_put_success(bucket: str, key: str, location: str, etag: str):
+    root = Element("PutObjectResult")
+    SubElement(root, "Bucket").text = bucket
+    SubElement(root, "Key").text = key
+    SubElement(root, "Location").text = location
+    SubElement(root, "ETag").text = f'"{etag}"'
+    payload = tostring(root, encoding="utf-8")
+    response = make_response(payload, 200)
+    response.mimetype = "application/xml"
+    response.headers["ETag"] = f'"{etag}"'
+    response.headers["Location"] = location
+    response.headers["x-amz-request-id"] = uuid.uuid4().hex
+    return response
 
 
 @app.before_request
@@ -202,51 +308,28 @@ def fileupload():
         return jsonify({"error": "Invalid filename"}), 400
 
     config = load_config()
-    requested_retention = request.form.get("retention_hours")
-    if requested_retention in ("", None):
-        requested_retention = request.args.get("retention_hours")
-    if requested_retention in ("", None) and request.is_json:
-        payload = request.get_json(silent=True) or {}
-        requested_retention = payload.get("retention_hours")
-
-    if requested_retention in ("", None):
-        retention_hours = config.get("retention_hours", 24)
-    else:
-        try:
-            retention_hours = float(requested_retention)
-        except (TypeError, ValueError):
-            app.logger.warning("upload_failed reason=invalid_retention value=%s", requested_retention)
-            return (
-                jsonify(
-                    {
-                        "error": "Invalid retention_hours value",
-                        "allowed_range": [
-                            config["retention_min_hours"],
-                            config["retention_max_hours"],
-                        ],
-                    }
-                ),
-                400,
-            )
-        if not (config["retention_min_hours"] <= retention_hours <= config["retention_max_hours"]):
-            app.logger.warning(
-                "upload_failed reason=retention_out_of_bounds value=%.2f min=%.2f max=%.2f",
-                retention_hours,
-                config["retention_min_hours"],
-                config["retention_max_hours"],
-            )
-            return (
-                jsonify(
-                    {
-                        "error": "Retention must be within the configured range.",
-                        "allowed_range": [
-                            config["retention_min_hours"],
-                            config["retention_max_hours"],
-                        ],
-                    }
-                ),
-                400,
-            )
+    payload = request.get_json(silent=True) if request.is_json else None
+    try:
+        retention_hours = resolve_retention(
+            config,
+            request.form.get("retention_hours"),
+            request.args.get("retention_hours"),
+            (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
+        )
+    except RetentionValidationError as error:
+        allowed_range = error.allowed_range or [
+            config["retention_min_hours"],
+            config["retention_max_hours"],
+        ]
+        app.logger.warning(
+            "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
+            request.form.get("retention_hours")
+            or request.args.get("retention_hours")
+            or (payload or {}).get("retention_hours"),
+            allowed_range[0],
+            allowed_range[1],
+        )
+        return jsonify(error.to_payload()), 400
 
     stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
     upload_path = UPLOADS_DIR / stored_name
@@ -383,6 +466,194 @@ def serve_raw_file(direct_path: str):
         as_attachment=False,
         download_name=record["original_name"],
     )
+
+
+@app.route("/s3/<bucket>", methods=["POST"])
+def s3_multipart_upload(bucket: str):
+    config = load_config()
+    upload = request.files.get("file")
+    if upload is None:
+        return _s3_error_response(
+            "InvalidArgument",
+            "Missing file field 'file'.",
+            bucket=bucket,
+        )
+
+    key = (
+        request.form.get("key")
+        or request.form.get("Key")
+        or upload.filename
+        or f"upload-{uuid.uuid4().hex}"
+    )
+    if "${filename}" in key and upload.filename:
+        key = key.replace("${filename}", upload.filename)
+
+    original_name = (
+        request.form.get("x-amz-meta-original-filename")
+        or request.form.get("X-Amz-Meta-Original-Filename")
+        or os.path.basename(key)
+        or upload.filename
+        or f"upload-{uuid.uuid4().hex}"
+    )
+    filename = secure_filename(original_name)
+    if not filename:
+        filename = secure_filename(upload.filename or "upload") or f"upload-{uuid.uuid4().hex}"
+
+    stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+    upload_path = UPLOADS_DIR / stored_name
+
+    hash_md5 = hashlib.md5()
+    if hasattr(upload.stream, "seek"):
+        upload.stream.seek(0)
+    with upload_path.open("wb") as destination:
+        while True:
+            chunk = upload.stream.read(1024 * 1024)
+            if not chunk:
+                break
+            destination.write(chunk)
+            hash_md5.update(chunk)
+
+    try:
+        retention_hours = resolve_retention(
+            config,
+            request.form.get("x-amz-meta-retention-hours"),
+            request.headers.get("x-amz-meta-retention-hours"),
+            request.args.get("retentionHours"),
+        )
+    except RetentionValidationError as error:
+        upload_path.unlink(missing_ok=True)
+        lifecycle_logger.warning(
+            "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+        )
+        return _s3_error_response(
+            "InvalidRequest",
+            str(error),
+            bucket=bucket,
+            key=key,
+        )
+
+    size = upload_path.stat().st_size
+    file_id = register_file(
+        original_name=filename,
+        stored_name=stored_name,
+        content_type=upload.content_type,
+        size=size,
+        retention_hours=retention_hours,
+    )
+
+    record = get_file(file_id)
+    direct_path = record["direct_path"] if record and record["direct_path"] else None
+    if direct_path:
+        location = url_for(
+            "serve_raw_file",
+            direct_path=direct_path,
+            _external=True,
+        )
+    else:
+        location = url_for("download", file_id=file_id, _external=True)
+
+    lifecycle_logger.info(
+        "file_uploaded_s3_post file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
+        file_id,
+        bucket,
+        key,
+        size,
+        retention_hours,
+    )
+
+    response = _build_s3_post_success(
+        bucket,
+        key,
+        location,
+        hash_md5.hexdigest(),
+    )
+    response.headers["x-localhosting-file-id"] = file_id
+    return response
+
+
+@app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
+def s3_put_object(bucket: str, key: str):
+    config = load_config()
+    stream = request.stream
+
+    hash_md5 = hashlib.md5()
+    stored_filename = secure_filename(os.path.basename(key)) or f"upload-{uuid.uuid4().hex}"
+    stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
+    upload_path = UPLOADS_DIR / stored_name
+
+    with upload_path.open("wb") as destination:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            destination.write(chunk)
+            hash_md5.update(chunk)
+
+    try:
+        retention_hours = resolve_retention(
+            config,
+            request.headers.get("x-amz-meta-retention-hours"),
+            request.args.get("retentionHours"),
+        )
+    except RetentionValidationError as error:
+        upload_path.unlink(missing_ok=True)
+        lifecycle_logger.warning(
+            "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
+        )
+        return _s3_error_response(
+            "InvalidRequest",
+            str(error),
+            bucket=bucket,
+            key=key,
+        )
+
+    original_name = (
+        request.headers.get("x-amz-meta-original-filename")
+        or request.headers.get("x-amz-meta-filename")
+        or os.path.basename(key)
+        or stored_filename
+    )
+    filename = secure_filename(original_name) or stored_filename
+
+    size = upload_path.stat().st_size
+    content_type = request.headers.get("Content-Type")
+
+    file_id = register_file(
+        original_name=filename,
+        stored_name=stored_name,
+        content_type=content_type,
+        size=size,
+        retention_hours=retention_hours,
+    )
+
+    record = get_file(file_id)
+    direct_path = record["direct_path"] if record and record["direct_path"] else None
+    if direct_path:
+        location = url_for(
+            "serve_raw_file",
+            direct_path=direct_path,
+            _external=True,
+        )
+    else:
+        location = url_for("download", file_id=file_id, _external=True)
+
+    lifecycle_logger.info(
+        "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
+        file_id,
+        bucket,
+        key,
+        size,
+        retention_hours,
+    )
+
+    response = _build_s3_put_success(
+        bucket,
+        key,
+        location,
+        hash_md5.hexdigest(),
+    )
+    response.headers["x-localhosting-file-id"] = file_id
+    return response
 
 
 @app.errorhandler(404)

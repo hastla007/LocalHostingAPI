@@ -5,6 +5,7 @@ Local Hosting API is a lightweight self-hosted file upload service designed for 
 ## Features
 
 - **Upload API** – Send files to `/fileupload` using multipart form data.
+- **S3-compatible uploads** – Target `/s3/<bucket>` (POST) or `/s3/<bucket>/<key>` (PUT) using clients that speak the Amazon S3 object API.
 - **Web dashboard** – Browse uploads at `/hosting`, download files, remove them manually, and track expiration details. Use `/upload-a-file` for the drag-and-drop uploader with retention controls.
 - **Shareable download links** – Retrieve classic ID-based URLs, direct links that embed the original filename, or raw filename-only URLs for inline streaming.
 - **API documentation** – Review example requests and responses at `/api-docs`.
@@ -30,7 +31,8 @@ The service will be available at <http://localhost:8000>.
 ### API Documentation
 
 Navigate to <http://localhost:8000/api-docs> for detailed examples covering file uploads and downloads, including ready-to-use
-`curl` commands, sample responses, and notes about the ID-based, direct, and raw filename download URLs returned by the API.
+`curl` commands, sample responses, Amazon S3-compatible object uploads, and notes about the ID-based, direct, and raw filename
+download URLs returned by the API.
 
 ### Configuring Retention
 

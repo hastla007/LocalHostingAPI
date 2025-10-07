@@ -4,7 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+from xml.etree import ElementTree as ET
 
 
 class LocalHostingAppIntegrationTests(unittest.TestCase):
@@ -132,6 +133,144 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         response = self.client.get("/upload-a-file")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Upload a File", response.data)
+
+    def test_s3_post_upload_flow(self):
+        response = self.client.post(
+            "/s3/example-bucket",
+            data={
+                "key": "clips/${filename}",
+                "x-amz-meta-retention-hours": "2",
+                "file": (io.BytesIO(b"s3 post data"), "clip.txt"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.mimetype, "application/xml")
+        file_id = response.headers.get("x-localhosting-file-id")
+        self.assertIsNotNone(file_id)
+
+        root = ET.fromstring(response.data)
+        self.assertEqual(root.findtext("Bucket"), "example-bucket")
+        self.assertEqual(root.findtext("Key"), "clips/clip.txt")
+        location = root.findtext("Location")
+        self.assertIsNotNone(location)
+
+        download_path = urlparse(location).path
+        download_response = self.client.get(download_path)
+        self.assertEqual(download_response.status_code, 200)
+        download_response.close()
+
+    def test_hosting_lists_all_uploaded_files(self):
+        api_response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"api upload"), "api-upload.txt"),
+                "retention_hours": "2",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(api_response.status_code, 201)
+        api_payload = api_response.get_json()
+
+        s3_post_response = self.client.post(
+            "/s3/example-bucket",
+            data={
+                "key": "assets/${filename}",
+                "x-amz-meta-retention-hours": "3",
+                "file": (io.BytesIO(b"s3 post upload"), "s3-post.bin"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(s3_post_response.status_code, 201)
+        s3_post_id = s3_post_response.headers.get("x-localhosting-file-id")
+        self.assertIsNotNone(s3_post_id)
+        s3_post_record = self.storage.get_file(s3_post_id)
+
+        s3_put_response = self.client.put(
+            "/s3/example-bucket/videos/s3-put.bin",
+            data=b"s3 put upload",
+            headers={
+                "x-amz-meta-retention-hours": "4",
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        self.assertEqual(s3_put_response.status_code, 200)
+        s3_put_id = s3_put_response.headers.get("x-localhosting-file-id")
+        self.assertIsNotNone(s3_put_id)
+        s3_put_record = self.storage.get_file(s3_put_id)
+
+        hosting_page = self.client.get("/hosting")
+        self.assertEqual(hosting_page.status_code, 200)
+        html = hosting_page.data.decode()
+
+        # Uploaded file names should appear in the listing.
+        self.assertIn("api-upload.txt", html)
+        self.assertIn(s3_post_record["original_name"], html)
+        self.assertIn(s3_put_record["original_name"], html)
+
+        # Download, direct, and raw URLs should be rendered for each upload.
+        self.assertIn(f"/download/{api_payload['id']}", html)
+        self.assertIn(f"/download/{s3_post_id}", html)
+        self.assertIn(f"/download/{s3_put_id}", html)
+
+        self.assertIn(
+            f"/files/{api_payload['id']}/{quote(api_payload['filename'])}",
+            html,
+        )
+        self.assertIn(
+            f"/files/{s3_post_id}/{quote(s3_post_record['original_name'])}",
+            html,
+        )
+        self.assertIn(
+            f"/files/{s3_put_id}/{quote(s3_put_record['original_name'])}",
+            html,
+        )
+
+        api_raw_path = api_payload.get("raw_download_path")
+        if api_raw_path:
+            self.assertIn(f"href=\"/{api_raw_path}\"", html)
+
+        if s3_post_record["direct_path"]:
+            self.assertIn(f"href=\"/{s3_post_record['direct_path']}\"", html)
+
+        if s3_put_record["direct_path"]:
+            self.assertIn(f"href=\"/{s3_put_record['direct_path']}\"", html)
+
+    def test_s3_put_upload_flow(self):
+        response = self.client.put(
+            "/s3/example-bucket/assets/video.bin",
+            data=b"binary payload",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Amz-Meta-Retention-Hours": "1",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/xml")
+        file_id = response.headers.get("x-localhosting-file-id")
+        self.assertIsNotNone(file_id)
+
+        root = ET.fromstring(response.data)
+        self.assertEqual(root.findtext("Bucket"), "example-bucket")
+        self.assertEqual(root.findtext("Key"), "assets/video.bin")
+        location = root.findtext("Location")
+        download_path = urlparse(location).path
+
+        download_response = self.client.get(download_path)
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.data, b"binary payload")
+        download_response.close()
+
+    def test_s3_retention_validation_failure(self):
+        response = self.client.put(
+            "/s3/example-bucket/invalid.txt",
+            data=b"bad",
+            headers={"X-Amz-Meta-Retention-Hours": "9999"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.mimetype, "application/xml")
+        root = ET.fromstring(response.data)
+        self.assertEqual(root.findtext("Code"), "InvalidRequest")
 
 
 if __name__ == "__main__":
