@@ -140,6 +140,28 @@
   -F "attributes={\"name\":\"report.pdf\"}" \
   -F "file=@/path/to/report.pdf" \
   {{ request.url_root.rstrip('/') }}/2.0/files/content</code></pre>
+    <h4>Sample JSON Response</h4>
+    <pre><code>{
+  "total_count": 1,
+  "entries": [
+    {
+      "type": "file",
+      "id": "1234567890",
+      "sequence_id": "0",
+      "etag": "0",
+      "sha1": "6a9c1b5b6f5b88f16a5aa764f4144f8aa5a61234",
+      "name": "report.pdf",
+      "size": 523980,
+      "created_at": "2024-06-04T18:43:07Z",
+      "modified_at": "2024-06-04T18:43:07Z",
+      "expires_at": "2024-06-07T18:43:07Z",
+      "retention_hours": {{ config.retention_hours }},
+      "download_url": "{{ request.url_root.rstrip('/') }}/2.0/files/1234567890/content",
+      "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/1234567890/report.pdf",
+      "raw_download_url": "{{ request.url_root.rstrip('/') }}/report.pdf"
+    }
+  ]
+}</code></pre>
     <h3>Download Content</h3>
     <p><strong>Endpoint:</strong> <code>GET /2.0/files/&lt;id&gt;/content</code></p>
     <p>
@@ -154,6 +176,20 @@
       <code>upload_url</code>, and <code>url</code> so Box automations can link directly to the compatible upload and
       download routes.
     </p>
+    <h4>Sample JSON Response</h4>
+    <pre><code>{
+  "type": "file_request",
+  "id": "1234567890",
+  "title": "Upload report.pdf",
+  "description": "Local Hosting API Box-compatible upload",
+  "status": "active",
+  "retention_hours": {{ config.retention_hours }},
+  "upload_url": "{{ request.url_root.rstrip('/') }}/2.0/files/content",
+  "url": "{{ request.url_root.rstrip('/') }}/2.0/files/1234567890/content",
+  "download_url": "{{ request.url_root.rstrip('/') }}/download/1234567890",
+  "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/1234567890/report.pdf",
+  "raw_download_url": "{{ request.url_root.rstrip('/') }}/report.pdf"
+}</code></pre>
   </section>
 
   <section class="card">
