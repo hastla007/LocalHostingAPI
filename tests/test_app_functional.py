@@ -81,8 +81,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         raw_response.close()
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
-        stored_files = list(uploads_dir.iterdir())
-        self.assertEqual(len(stored_files), 1)
+        record = self.storage.get_file(payload["id"])
+        self.assertIsNotNone(record)
+        file_path = self.storage.get_storage_path(record["id"], record["stored_name"])
+        self.assertTrue(file_path.exists())
+        self.assertEqual(file_path.parent.parent, uploads_dir)
 
     def test_retention_validation_and_cleanup(self):
         invalid_response = self.client.post(
@@ -114,7 +117,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(download_response.status_code, 404)
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
-        self.assertFalse(any(uploads_dir.iterdir()))
+        self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
 
     def test_multi_file_upload_support(self):
         response = self.client.post(
@@ -195,7 +198,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn(b"File deleted successfully.", delete_response.data)
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
-        self.assertFalse(any(uploads_dir.iterdir()))
+        self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
 
     def test_delete_route_missing_file_shows_error(self):
         response = self.client.post(

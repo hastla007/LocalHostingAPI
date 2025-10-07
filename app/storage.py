@@ -78,6 +78,44 @@ def ensure_directories() -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _storage_prefix(file_id: str) -> str:
+    sanitized = (file_id or "").replace("-", "")
+    if len(sanitized) < 2:
+        sanitized = (sanitized + "00")[:2]
+    return sanitized[:2]
+
+
+def get_storage_path(file_id: str, stored_name: str, ensure_parent: bool = False) -> Path:
+    """Return the storage path for *stored_name* within a sharded directory."""
+
+    directory = UPLOADS_DIR / _storage_prefix(file_id)
+    if ensure_parent:
+        directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / stored_name
+    if candidate.exists() or ensure_parent:
+        return candidate
+    # Fall back to the legacy flat layout when upgrading existing entries.
+    return UPLOADS_DIR / stored_name
+
+
+def prune_empty_upload_dirs(path: Path) -> None:
+    """Remove empty shard directories after file deletion."""
+
+    current = path
+    try:
+        current = current.resolve()
+    except FileNotFoundError:
+        return
+
+    uploads_root = UPLOADS_DIR.resolve()
+    while current != uploads_root and uploads_root in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
 def get_db() -> sqlite3.Connection:
     ensure_directories()
     conn = sqlite3.connect(DB_PATH)
@@ -248,8 +286,9 @@ def register_file(
     content_type: Optional[str],
     size: int,
     retention_hours: float,
+    file_id: Optional[str] = None,
 ) -> str:
-    file_id = str(uuid.uuid4())
+    file_id = file_id or str(uuid.uuid4())
     uploaded_at = time.time()
     expires_at = calculate_expiration(retention_hours)
     with get_db() as conn:
@@ -306,9 +345,10 @@ def delete_file(file_id: str) -> bool:
     if not record:
         return False
     stored_name = record["stored_name"]
-    file_path = UPLOADS_DIR / stored_name
+    file_path = get_storage_path(file_id, stored_name)
     if file_path.exists():
         file_path.unlink()
+        prune_empty_upload_dirs(file_path.parent)
     with get_db() as conn:
         conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
         conn.commit()
@@ -328,12 +368,13 @@ def cleanup_expired_files() -> int:
         cursor = conn.execute("SELECT id, stored_name FROM files WHERE expires_at < ?", (now,))
         expired_files = cursor.fetchall()
         for record in expired_files:
-            file_path = UPLOADS_DIR / record["stored_name"]
+            file_path = get_storage_path(record["id"], record["stored_name"])
             if file_path.exists():
                 try:
                     file_path.unlink()
                 except OSError:
                     pass
+                prune_empty_upload_dirs(file_path.parent)
             conn.execute("DELETE FROM files WHERE id = ?", (record["id"],))
             removed += 1
         conn.commit()

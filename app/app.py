@@ -13,33 +13,34 @@ from logging.handlers import RotatingFileHandler
 
 from flask import (
     Flask,
+    Response,
     abort,
     flash,
     jsonify,
     make_response,
-    Response,
     redirect,
     render_template,
     request,
-    send_from_directory,
+    send_file,
     url_for,
 )
 from werkzeug.utils import secure_filename
 
 from .storage import (
-    UPLOADS_DIR,
     LOGS_DIR,
+    RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
     delete_file,
+    ensure_directories,
     get_file,
     get_file_by_direct_path,
+    get_storage_path,
     iter_files,
     list_files,
     load_config,
+    prune_empty_upload_dirs,
     register_file,
-    RESERVED_DIRECT_PATHS,
     save_config,
-    ensure_directories,
 )
 
 RESERVED_ROUTE_ENDPOINTS = {
@@ -511,9 +512,10 @@ def fileupload():
 
     results = []
     for upload, filename in valid_uploads:
+        file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-        upload_path = UPLOADS_DIR / stored_name
-        upload.save(upload_path)
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+        upload.save(str(upload_path))
         size = upload_path.stat().st_size
 
         file_id = register_file(
@@ -522,6 +524,7 @@ def fileupload():
             content_type=upload.content_type,
             size=size,
             retention_hours=retention_hours,
+            file_id=file_id,
         )
 
         record = get_file(file_id)
@@ -590,9 +593,14 @@ def download(file_id: str):
         cleanup_expired_files()
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
-    return send_from_directory(
-        directory=str(UPLOADS_DIR),
-        path=record["stored_name"],
+    file_path = get_storage_path(file_id, record["stored_name"])
+    if not file_path.exists():
+        lifecycle_logger.warning(
+            "file_download_missing_path file_id=%s stored_name=%s", file_id, record["stored_name"]
+        )
+        abort(404)
+    return send_file(
+        file_path,
         as_attachment=True,
         download_name=record["original_name"],
     )
@@ -618,9 +626,16 @@ def direct_download(file_id: str, filename: str):
         abort(404)
 
     lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
-    return send_from_directory(
-        directory=str(UPLOADS_DIR),
-        path=record["stored_name"],
+    file_path = get_storage_path(file_id, record["stored_name"])
+    if not file_path.exists():
+        lifecycle_logger.warning(
+            "file_direct_missing_path file_id=%s stored_name=%s",
+            file_id,
+            record["stored_name"],
+        )
+        abort(404)
+    return send_file(
+        file_path,
         as_attachment=True,
         download_name=record["original_name"],
     )
@@ -663,9 +678,14 @@ def serve_raw_file(direct_path: str):
     lifecycle_logger.info(
         "file_raw_downloaded file_id=%s direct_path=%s", record["id"], normalized
     )
-    return send_from_directory(
-        directory=str(UPLOADS_DIR),
-        path=record["stored_name"],
+    file_path = get_storage_path(record["id"], record["stored_name"])
+    if not file_path.exists():
+        lifecycle_logger.warning(
+            "file_raw_missing_path file_id=%s stored_name=%s", record["id"], record["stored_name"]
+        )
+        abort(404)
+    return send_file(
+        file_path,
         as_attachment=False,
         download_name=record["original_name"],
     )
@@ -702,8 +722,9 @@ def s3_multipart_upload(bucket: str):
     if not filename:
         filename = secure_filename(upload.filename or "upload") or f"upload-{uuid.uuid4().hex}"
 
+    file_id = str(uuid.uuid4())
     stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-    upload_path = UPLOADS_DIR / stored_name
+    upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
 
     hash_md5 = hashlib.md5()
     if hasattr(upload.stream, "seek"):
@@ -725,6 +746,7 @@ def s3_multipart_upload(bucket: str):
         )
     except RetentionValidationError as error:
         upload_path.unlink(missing_ok=True)
+        prune_empty_upload_dirs(upload_path.parent)
         lifecycle_logger.warning(
             "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
         )
@@ -742,6 +764,7 @@ def s3_multipart_upload(bucket: str):
         content_type=upload.content_type,
         size=size,
         retention_hours=retention_hours,
+        file_id=file_id,
     )
 
     record = get_file(file_id)
@@ -781,8 +804,9 @@ def s3_put_object(bucket: str, key: str):
 
     hash_md5 = hashlib.md5()
     stored_filename = secure_filename(os.path.basename(key)) or f"upload-{uuid.uuid4().hex}"
+    file_id = str(uuid.uuid4())
     stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
-    upload_path = UPLOADS_DIR / stored_name
+    upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
 
     with upload_path.open("wb") as destination:
         while True:
@@ -800,6 +824,7 @@ def s3_put_object(bucket: str, key: str):
         )
     except RetentionValidationError as error:
         upload_path.unlink(missing_ok=True)
+        prune_empty_upload_dirs(upload_path.parent)
         lifecycle_logger.warning(
             "s3_upload_retention_invalid bucket=%s key=%s", bucket, key
         )
@@ -827,6 +852,7 @@ def s3_put_object(bucket: str, key: str):
         content_type=content_type,
         size=size,
         retention_hours=retention_hours,
+        file_id=file_id,
     )
 
     record = get_file(file_id)
