@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+venv/
+ENV/
+.env.local
+.env.*
+
+# Local data directories created at runtime
+app/uploads/
+app/data/
+
+# SQLite databases
+*.db
+*.sqlite3
+
+# macOS clutter
+.DS_Store

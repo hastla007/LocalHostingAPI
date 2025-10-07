@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>API Overview</h2>
+    <p>The Local Hosting API allows clients on your LAN to upload files and retrieve them later using simple HTTP requests.</p>
+    <p>Base URL: <code>{{ request.url_root.rstrip('/') }}</code></p>
+    <p>
+      Files expire automatically according to the retention policy configured on the <a href="{{ url_for('settings') }}">settings</a> page.
+      Current bounds allow custom expirations between <strong>{{ config.retention_min_hours }}</strong> and <strong>{{ config.retention_max_hours }}</strong> hours
+      with a default of <strong>{{ config.retention_hours }}</strong> hours.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Upload a File</h2>
+    <p><strong>Endpoint:</strong> <code>POST /fileupload</code></p>
+    <p>Send a multipart/form-data request with a single field named <code>file</code>.</p>
+    <p>
+      Optional fields:
+    </p>
+    <ul>
+      <li><code>retention_hours</code> &mdash; number of hours to keep this upload (must be within the configured range).</li>
+    </ul>
+    <h3>cURL Example</h3>
+    <pre><code>curl -F "file=@/path/to/your/file" {{ request.url_root.rstrip('/') }}/fileupload</code></pre>
+    <h3>Sample JSON Response</h3>
+    <pre><code>{
+  "id": "b0f6f1a3a2f744e0a33e8b9ef9b31dc7",
+  "filename": "document.pdf",
+  "size": 523980,
+  "download_url": "{{ request.url_root.rstrip('/') }}/download/&lt;id&gt;",
+  "direct_download_url": "{{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf",
+  "raw_download_url": "{{ request.url_root.rstrip('/') }}/document.pdf",
+  "raw_download_path": "document.pdf",
+  "retention_hours": {{ config.retention_hours }},
+  "uploaded_at": 1717430587.706497,
+  "expires_at": 1717516987.706497,
+  "expires_at_iso": "2024-06-04T18:43:07",
+  "message": "File uploaded successfully."
+}</code></pre>
+    <p><strong>Status Codes:</strong></p>
+    <ul>
+      <li><code>201 Created</code> – file was stored successfully.</li>
+      <li><code>400 Bad Request</code> – the request was invalid (missing file, bad filename, or retention outside the allowed range).</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>Download a File</h2>
+    <p><strong>Endpoint:</strong> <code>GET /download/&lt;id&gt;</code></p>
+    <p>Use the <code>download_url</code> returned during upload or substitute the file ID:</p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/download/&lt;id&gt;</code></pre>
+    <p>
+      A second direct endpoint preserves the original filename in the URL for easier sharing:
+      <code>GET /files/&lt;id&gt;/&lt;original_filename&gt;</code>.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/files/&lt;id&gt;/document.pdf</code></pre>
+    <p>
+      New uploads also receive a raw filename URL that omits the ID entirely, ideal for inline playback or embedding:
+      <code>GET /&lt;original_filename&gt;</code>. If a filename is already in use, a numeric suffix (for example <code>report-1.pdf</code>) is appended to keep the paths unique.
+    </p>
+    <pre><code>curl -O {{ request.url_root.rstrip('/') }}/document.pdf</code></pre>
+    <p>
+      All endpoints honor the original filename and require the file to be unexpired; otherwise a <code>404 Not Found</code> is returned.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Managing Stored Files</h2>
+    <p>Use the <a href="{{ url_for('hosting') }}">Hosting</a> dashboard to view, download, or delete uploads through the web interface.</p>
+  </section>
+{% endblock %}
