@@ -153,6 +153,8 @@ from .storage import (
     save_config,
 )
 
+_CONFIG_CACHE: Dict[str, Any] = load_config()
+
 from threading import Semaphore
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -458,11 +460,38 @@ def _build_log_response(source: dict) -> dict:
     return payload
 
 
+def _apply_upload_limit(config: Dict[str, Any]) -> None:
+    flask_app = globals().get("app")
+    if flask_app is None:
+        return
+
+    try:
+        size_mb = float(config.get("max_upload_size_mb", 0))
+    except (TypeError, ValueError):
+        size_mb = 0.0
+
+    size_mb = max(1.0, size_mb)
+    limit_bytes = int(size_mb * 1024 * 1024)
+    flask_app.config["MAX_CONTENT_LENGTH"] = limit_bytes
+    flask_app.config["MAX_UPLOAD_SIZE_MB"] = size_mb
+
+
 def get_config(refresh: bool = False) -> Dict[str, Any]:
-    config = getattr(g, "_app_config", None)
-    if refresh or config is None:
-        config = load_config()
-        g._app_config = config
+    global _CONFIG_CACHE
+    if refresh or _CONFIG_CACHE is None:
+        _CONFIG_CACHE = load_config()
+
+    if has_request_context():
+        cached = getattr(g, "_app_config", None)
+        if cached is None or refresh:
+            g._app_config = _CONFIG_CACHE
+            config = g._app_config
+        else:
+            config = cached
+    else:
+        config = _CONFIG_CACHE
+
+    _apply_upload_limit(config)
     return config
 
 
@@ -656,6 +685,8 @@ app.config["MAX_CONTENT_LENGTH"] = max(1, max_upload_size_mb) * 1024 * 1024
 app.config["SECRET_KEY"] = get_secret_key_value()
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
+
+_apply_upload_limit(_CONFIG_CACHE)
 
 _base_lifecycle_logger = logging.getLogger("localhosting.lifecycle")
 _base_lifecycle_logger.setLevel(numeric_level)
@@ -1183,6 +1214,11 @@ def settings():
         refreshed = False
 
         if action == "update_retention":
+            upload_limit_input = request.form.get("max_upload_size_mb")
+            current_limit_mb = config.get("max_upload_size_mb") or (
+                app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024) / (1024 * 1024)
+            )
+
             try:
                 retention_min = float(
                     request.form.get("retention_min_hours", config["retention_min_hours"])
@@ -1193,9 +1229,19 @@ def settings():
                 retention_hours = float(
                     request.form.get("retention_hours", config["retention_hours"])
                 )
+                if upload_limit_input is None or upload_limit_input == "":
+                    upload_limit_mb = float(current_limit_mb)
+                else:
+                    upload_limit_mb = float(upload_limit_input)
             except (TypeError, ValueError):
-                flash("Please provide valid numbers for retention settings.", "error")
-                return render_settings_page(config)
+                flash(
+                    "Please provide valid numbers for retention settings and the upload size limit.",
+                    "error",
+                )
+                proposed = deepcopy(config)
+                if upload_limit_input is not None:
+                    proposed["max_upload_size_mb"] = upload_limit_input
+                return render_settings_page(proposed)
 
             proposed = deepcopy(config)
             proposed.update(
@@ -1203,6 +1249,7 @@ def settings():
                     "retention_min_hours": retention_min,
                     "retention_max_hours": retention_max,
                     "retention_hours": retention_hours,
+                    "max_upload_size_mb": upload_limit_mb,
                 }
             )
 
@@ -1221,17 +1268,21 @@ def settings():
                     "error",
                 )
                 return render_settings_page(proposed)
+            if upload_limit_mb < 1:
+                flash("Maximum upload size must be at least 1 MB.", "error")
+                return render_settings_page(proposed)
 
             save_config(proposed)
             get_config(refresh=True)
             refreshed = True
             lifecycle_logger.info(
-                "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
+                "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f upload_limit_mb=%.2f",
                 retention_min,
                 retention_max,
                 retention_hours,
+                upload_limit_mb,
             )
-            flash("Retention settings updated.", "success")
+            flash("Retention and upload size settings updated.", "success")
 
         elif action == "update_ui_auth":
             auth_enabled = request.form.get("ui_auth_enabled") == "on"

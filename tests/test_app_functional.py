@@ -190,6 +190,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
                 "retention_min_hours": "1",
                 "retention_max_hours": "48",
                 "retention_hours": "12",
+                "max_upload_size_mb": "256",
             },
             follow_redirects=True,
         )
@@ -198,8 +199,13 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(config["retention_min_hours"], 1.0)
         self.assertEqual(config["retention_max_hours"], 48.0)
         self.assertEqual(config["retention_hours"], 12.0)
+        self.assertEqual(config["max_upload_size_mb"], 256.0)
         self.assertFalse(config["ui_auth_enabled"])
         self.assertFalse(config["api_auth_enabled"])
+        self.assertEqual(
+            self.app.config.get("MAX_CONTENT_LENGTH"),
+            256 * 1024 * 1024,
+        )
 
     def test_upload_page_renders(self):
         response = self.client.get("/upload-a-file")
@@ -217,6 +223,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         response = self.client.get("/settings")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Retention Settings", response.data)
+        self.assertIn(b"Maximum upload size", response.data)
 
     def test_index_redirects_to_hosting(self):
         response = self.client.get("/", follow_redirects=False)

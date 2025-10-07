@@ -35,10 +35,14 @@ def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
 
+DEFAULT_MAX_UPLOAD_MB = max(1, int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500")))
+
+
 DEFAULT_CONFIG = {
     "retention_hours": 24.0,
     "retention_min_hours": 0.0,
     "retention_max_hours": 168.0,
+    "max_upload_size_mb": float(DEFAULT_MAX_UPLOAD_MB),
     "ui_auth_enabled": False,
     "ui_username": "admin",
     "ui_password_hash": _default_password_hash(),
@@ -51,6 +55,7 @@ CONFIG_NUMERIC_KEYS = {
     "retention_hours",
     "retention_min_hours",
     "retention_max_hours",
+    "max_upload_size_mb",
 }
 
 CONFIG_BOOLEAN_KEYS = {"ui_auth_enabled", "api_auth_enabled"}
@@ -87,6 +92,10 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
         max(config["retention_hours"], config["retention_min_hours"]),
         config["retention_max_hours"],
     )
+
+    if config.get("max_upload_size_mb", 0) < 1:
+        config["max_upload_size_mb"] = float(DEFAULT_MAX_UPLOAD_MB)
+
     for key in CONFIG_BOOLEAN_KEYS:
         if key in raw_config:
             value = raw_config.get(key)
