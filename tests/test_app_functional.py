@@ -113,6 +113,39 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
         self.assertFalse(any(uploads_dir.iterdir()))
 
+    def test_multi_file_upload_support(self):
+        response = self.client.post(
+            "/fileupload",
+            data={
+                "file": [
+                    (io.BytesIO(b"first"), "first.txt"),
+                    (io.BytesIO(b"second"), "second.txt"),
+                ],
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertIsNotNone(payload)
+        self.assertIn("files", payload)
+        self.assertEqual(len(payload["files"]), 2)
+        filenames = {entry["filename"] for entry in payload["files"]}
+        self.assertSetEqual(filenames, {"first.txt", "second.txt"})
+
+        for entry in payload["files"]:
+            self.assertIn("download_url", entry)
+            download_path = urlparse(entry["download_url"]).path
+            download_response = self.client.get(download_path)
+            self.assertEqual(download_response.status_code, 200)
+            download_response.close()
+
+        hosting_page = self.client.get("/hosting")
+        self.assertEqual(hosting_page.status_code, 200)
+        html = hosting_page.data.decode()
+        self.assertIn("first.txt", html)
+        self.assertIn("second.txt", html)
+
     def test_settings_update_persists(self):
         response = self.client.post(
             "/settings",

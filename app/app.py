@@ -298,14 +298,23 @@ def fileupload():
     if "file" not in request.files:
         app.logger.warning("upload_failed reason=no_file_part")
         return jsonify({"error": "No file part"}), 400
-    upload = request.files["file"]
-    if upload.filename == "":
+
+    uploads = request.files.getlist("file")
+    valid_uploads = []
+    for upload in uploads:
+        if not upload or upload.filename == "":
+            continue
+        filename = secure_filename(upload.filename)
+        if not filename:
+            app.logger.warning(
+                "upload_failed reason=invalid_filename original=%s", upload.filename
+            )
+            return jsonify({"error": "Invalid filename"}), 400
+        valid_uploads.append((upload, filename))
+
+    if not valid_uploads:
         app.logger.warning("upload_failed reason=no_file_selected")
         return jsonify({"error": "No file selected"}), 400
-    filename = secure_filename(upload.filename)
-    if not filename:
-        app.logger.warning("upload_failed reason=invalid_filename original=%s", upload.filename)
-        return jsonify({"error": "Invalid filename"}), 400
 
     config = load_config()
     payload = request.get_json(silent=True) if request.is_json else None
@@ -331,44 +340,45 @@ def fileupload():
         )
         return jsonify(error.to_payload()), 400
 
-    stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-    upload_path = UPLOADS_DIR / stored_name
-    upload.save(upload_path)
-    size = upload_path.stat().st_size
+    results = []
+    for upload, filename in valid_uploads:
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = UPLOADS_DIR / stored_name
+        upload.save(upload_path)
+        size = upload_path.stat().st_size
 
-    file_id = register_file(
-        original_name=filename,
-        stored_name=stored_name,
-        content_type=upload.content_type,
-        size=size,
-        retention_hours=retention_hours,
-    )
-
-    record = get_file(file_id)
-    if record:
-        expires_at = record["expires_at"]
-        uploaded_at = record["uploaded_at"]
-        raw_download_url = url_for(
-            "serve_raw_file", direct_path=record["direct_path"], _external=True
+        file_id = register_file(
+            original_name=filename,
+            stored_name=stored_name,
+            content_type=upload.content_type,
+            size=size,
+            retention_hours=retention_hours,
         )
-    else:
-        expires_at = time.time()
-        uploaded_at = expires_at
-        raw_download_url = ""
 
-    download_url = url_for("download", file_id=file_id, _external=True)
-    direct_download_url = url_for(
-        "direct_download", file_id=file_id, filename=filename, _external=True
-    )
-    lifecycle_logger.info(
-        "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
-        file_id,
-        filename,
-        size,
-        retention_hours,
-    )
-    return (
-        jsonify(
+        record = get_file(file_id)
+        if record:
+            expires_at = record["expires_at"]
+            uploaded_at = record["uploaded_at"]
+            raw_download_url = url_for(
+                "serve_raw_file", direct_path=record["direct_path"], _external=True
+            )
+        else:
+            expires_at = time.time()
+            uploaded_at = expires_at
+            raw_download_url = ""
+
+        download_url = url_for("download", file_id=file_id, _external=True)
+        direct_download_url = url_for(
+            "direct_download", file_id=file_id, filename=filename, _external=True
+        )
+        lifecycle_logger.info(
+            "file_uploaded file_id=%s filename=%s size=%d retention_hours=%.2f",
+            file_id,
+            filename,
+            size,
+            retention_hours,
+        )
+        results.append(
             {
                 "id": file_id,
                 "filename": filename,
@@ -382,6 +392,18 @@ def fileupload():
                 "raw_download_url": raw_download_url,
                 "raw_download_path": record["direct_path"] if record else "",
                 "message": "File uploaded successfully.",
+            }
+        )
+
+    if len(results) == 1:
+        return jsonify(results[0]), 201
+
+    return (
+        jsonify(
+            {
+                "message": f"Uploaded {len(results)} files successfully.",
+                "files": results,
+                "retention_hours": retention_hours,
             }
         ),
         201,
