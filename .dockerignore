@@ -1,48 +1,36 @@
-# ---- Version control ----
+# --- VCS / meta ---
 .git
 .gitignore
 
-# ---- Python caches ----
+# --- Python caches / packaging artifacts ---
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.pycache
 *.egg-info/
 .eggs/
 
-# ---- Virtual environments ----
-env/
-venv/
+# --- Virtual environments ---
 .venv/
+venv/
 ENV/
-Pipfile.lock
-poetry.lock
+env/
 
-# ---- Local data & runtime outputs ----
-uploads/
-data/
-logs/
+# --- Local runtime data (persist via volumes instead) ---
+app/uploads/
+app/data/
+app/logs/
 *.log
 
-# ---- Build / OS clutter ----
+# --- Tests & examples (not needed in image) ---
+tests/
+
+# --- OS/editor clutter ---
 .DS_Store
 Thumbs.db
 *.swp
 *.tmp
 *.bak
-
-# ---- Docker artifacts ----
-Dockerfile
-docker-compose.yml
-
-# ---- IDE / Editor settings ----
 .vscode/
 .idea/
 *.code-workspace
-
-# ---- Tests & docs (optional) ----
-tests/
-docs/
-README.md
-LICENSE
