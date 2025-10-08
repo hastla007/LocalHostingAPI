@@ -1401,11 +1401,6 @@ def settings():
         refreshed = False
 
         if action == "update_retention":
-            upload_limit_input = request.form.get("max_upload_size_mb")
-            current_limit_mb = config.get("max_upload_size_mb") or (
-                app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024) / (1024 * 1024)
-            )
-
             try:
                 retention_min = float(
                     request.form.get("retention_min_hours", config["retention_min_hours"])
@@ -1416,19 +1411,9 @@ def settings():
                 retention_hours = float(
                     request.form.get("retention_hours", config["retention_hours"])
                 )
-                if upload_limit_input is None or upload_limit_input == "":
-                    upload_limit_mb = float(current_limit_mb)
-                else:
-                    upload_limit_mb = float(upload_limit_input)
             except (TypeError, ValueError):
-                flash(
-                    "Please provide valid numbers for retention settings and the upload size limit.",
-                    "error",
-                )
-                proposed = deepcopy(config)
-                if upload_limit_input is not None:
-                    proposed["max_upload_size_mb"] = upload_limit_input
-                return render_settings_page(proposed)
+                flash("Please provide valid numbers for retention settings.", "error")
+                return render_settings_page(deepcopy(config))
 
             proposed = deepcopy(config)
             proposed.update(
@@ -1436,7 +1421,6 @@ def settings():
                     "retention_min_hours": retention_min,
                     "retention_max_hours": retention_max,
                     "retention_hours": retention_hours,
-                    "max_upload_size_mb": upload_limit_mb,
                 }
             )
 
@@ -1455,23 +1439,23 @@ def settings():
                     "error",
                 )
                 return render_settings_page(proposed)
-            if upload_limit_mb < 1:
-                flash("Maximum upload size must be at least 1 MB.", "error")
-                return render_settings_page(proposed)
-
             save_config(proposed)
             get_config(refresh=True)
             refreshed = True
             lifecycle_logger.info(
-                "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f upload_limit_mb=%.2f",
+                "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
                 retention_min,
                 retention_max,
                 retention_hours,
-                upload_limit_mb,
             )
-            flash("Retention and upload size settings updated.", "success")
+            flash("Retention settings updated.", "success")
 
         elif action == "update_performance":
+            upload_limit_input = request.form.get("max_upload_size_mb")
+            current_limit_mb = config.get("max_upload_size_mb") or (
+                app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024) / (1024 * 1024)
+            )
+
             field_map = {
                 "max_concurrent_uploads": request.form.get("max_concurrent_uploads"),
                 "cleanup_interval_minutes": request.form.get("cleanup_interval_minutes"),
@@ -1481,43 +1465,54 @@ def settings():
             }
 
             try:
-                parsed_values = {
-                    key: int(float(value))
-                    for key, value in field_map.items()
-                    if value not in (None, "")
-                }
-                if len(parsed_values) != len(field_map):
-                    raise ValueError
+                parsed_values: Dict[str, int] = {}
+                for key, value in field_map.items():
+                    if value in (None, ""):
+                        raise ValueError
+                    parsed = int(float(value))
+                    if parsed < 1:
+                        raise ValueError
+                    parsed_values[key] = parsed
+
+                if upload_limit_input in (None, ""):
+                    upload_limit_mb = float(current_limit_mb)
+                else:
+                    upload_limit_mb = float(upload_limit_input)
             except (TypeError, ValueError):
-                flash("Please provide valid positive integers for performance settings.", "error")
+                flash("Please provide valid positive numbers for performance settings.", "error")
                 proposed = deepcopy(config)
                 for key, raw_value in field_map.items():
                     if raw_value is not None:
                         proposed[key] = raw_value
+                if upload_limit_input is not None:
+                    proposed["max_upload_size_mb"] = upload_limit_input
                 return render_settings_page(proposed)
 
-            if any(value < 1 for value in parsed_values.values()):
-                flash("All performance values must be at least 1.", "error")
+            if upload_limit_mb < 1:
+                flash("Maximum upload size must be at least 1 MB.", "error")
                 proposed = deepcopy(config)
+                proposed["max_upload_size_mb"] = upload_limit_input
                 for key, raw_value in field_map.items():
                     if raw_value is not None:
                         proposed[key] = raw_value
                 return render_settings_page(proposed)
 
             proposed = deepcopy(config)
-            proposed.update({key: float(value) for key, value in parsed_values.items()})
+            proposed.update(parsed_values)
+            proposed["max_upload_size_mb"] = upload_limit_mb
 
             save_config(proposed)
             get_config(refresh=True)
             refreshed = True
 
             lifecycle_logger.info(
-                "performance_settings_updated max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d",
+                "performance_settings_updated max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d upload_limit=%.2f",
                 parsed_values["max_concurrent_uploads"],
                 parsed_values["cleanup_interval_minutes"],
                 parsed_values["upload_rate_limit_per_hour"],
                 parsed_values["login_rate_limit_per_minute"],
                 parsed_values["download_rate_limit_per_minute"],
+                upload_limit_mb,
             )
             flash("Performance settings updated.", "success")
 

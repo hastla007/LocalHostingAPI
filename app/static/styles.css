@@ -544,6 +544,7 @@ main {
   color: #991b1b;
 }
 
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -557,19 +558,16 @@ main {
   gap: 1.5rem;
 }
 
-.settings-columns {
+.settings-row {
   display: flex;
-  flex-wrap: wrap;
   gap: 2rem;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
 }
 
-.settings-column {
-  flex: 1 1 280px;
-}
-
-.system-settings h3 {
-  margin: 0 0 0.75rem;
-  font-size: 1.1rem;
+.retention-card,
+.storage-card {
+  flex: 1 1 300px;
 }
 
 .settings-table {
@@ -604,9 +602,9 @@ main {
   width: 100%;
 }
 
-.settings-table td input.half-width-input {
-  width: 50%;
-  min-width: 140px;
+.performance-input {
+  width: 100%;
+  max-width: 180px;
 }
 
 .settings-action-row {
@@ -634,7 +632,7 @@ main {
 }
 
 @media (max-width: 768px) {
-  .settings-columns {
+  .settings-row {
     gap: 1.25rem;
   }
 

@@ -1,131 +1,103 @@
 {% extends "base.html" %}
 {% block content %}
-  <section class="card">
-    <h2>Retention Settings</h2>
-    <form method="post" class="retention-system-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-      <input type="hidden" name="action" value="update_retention" />
-
-      <div class="settings-columns">
-        <div class="settings-column">
-          <div class="form-grid">
-            <label for="retention_min_hours">Minimum retention (hours)</label>
-            <input
-              type="number"
-              id="retention_min_hours"
-              name="retention_min_hours"
-              min="0"
-              step="0.1"
-              value="{{ config.retention_min_hours }}"
-              required
-            />
-
-            <label for="retention_max_hours">Maximum retention (hours)</label>
-            <input
-              type="number"
-              id="retention_max_hours"
-              name="retention_max_hours"
-              min="0"
-              step="0.1"
-              value="{{ config.retention_max_hours }}"
-              required
-            />
-
-            <label for="retention_hours">Default retention (hours)</label>
-            <input
-              type="number"
-              id="retention_hours"
-              name="retention_hours"
-              min="0"
-              step="0.1"
-              value="{{ config.retention_hours }}"
-              required
-            />
-          </div>
-        </div>
-        <div class="settings-column">
-          <div class="system-settings">
-            <h3>System Settings</h3>
-            <table class="settings-table">
-              <tbody>
-                <tr>
-                  <th scope="row">
-                    <label for="max_upload_size_mb">Maximum upload size (MB)</label>
-                  </th>
-                  <td>
-                    <input
-                      type="number"
-                      id="max_upload_size_mb"
-                      name="max_upload_size_mb"
-                      min="1"
-                      step="0.1"
-                      value="{{ config.max_upload_size_mb }}"
-                      required
-                      class="half-width-input"
-                    />
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div class="form-actions">
-        <button type="submit" class="button primary">Save</button>
-      </div>
-    </form>
-    <p>
-      Each upload can now request its own retention period within the allowed range. Values outside of the configured bounds will be
-      rejected by the API and the dashboard uploader. You can also adjust the maximum upload size accepted by the service without
-      restarting the container.
-    </p>
-  </section>
-  <section class="card">
-    <h2>Storage Management</h2>
-    <table class="settings-table">
-      <tbody>
-        <tr>
-          <th scope="row">Total storage used</th>
-          <td>{{ '%.3f'|format(storage_overview.total_gb) }} GB</td>
-        </tr>
-        <tr>
-          <th scope="row">Active files</th>
-          <td>{{ storage_overview.active_count }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Expired files pending cleanup</th>
-          <td>{{ storage_overview.expired_count }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Storage quota limit</th>
-          <td>
-            {% if storage_quota_limit is not none %}
-              {{ '%.2f'|format(storage_quota_limit) }} GB
-            {% else %}
-              <span class="text-muted">Not configured</span>
-            {% endif %}
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="settings-action-row">
-      <form method="post">
+  <div class="settings-row">
+    <section class="card retention-card">
+      <h2>Retention Settings</h2>
+      <form method="post" class="retention-system-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-        <input type="hidden" name="action" value="cleanup_expired_now" />
-        <button type="submit" class="button primary">Cleanup Expired Files Now</button>
+        <input type="hidden" name="action" value="update_retention" />
+
+        <div class="form-grid">
+          <label for="retention_min_hours">Minimum retention (hours)</label>
+          <input
+            type="number"
+            id="retention_min_hours"
+            name="retention_min_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_min_hours }}"
+            required
+          />
+
+          <label for="retention_max_hours">Maximum retention (hours)</label>
+          <input
+            type="number"
+            id="retention_max_hours"
+            name="retention_max_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_max_hours }}"
+            required
+          />
+
+          <label for="retention_hours">Default retention (hours)</label>
+          <input
+            type="number"
+            id="retention_hours"
+            name="retention_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_hours }}"
+            required
+          />
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="button primary">Save</button>
+        </div>
       </form>
-      <form method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-        <input type="hidden" name="action" value="cleanup_orphaned_now" />
-        <button type="submit" class="button secondary">Remove Orphaned Files</button>
-      </form>
-    </div>
-    <p class="form-help">
-      Values reflect the current environment configuration. Future releases will allow adjusting these storage controls directly
-      within the dashboard.
-    </p>
-  </section>
+      <p>
+        Each upload can now request its own retention period within the allowed range. Values outside of the configured bounds
+        will be rejected by the API and the dashboard uploader.
+      </p>
+    </section>
+    <section class="card storage-card">
+      <h2>Storage Management</h2>
+      <table class="settings-table">
+        <tbody>
+          <tr>
+            <th scope="row">Total storage used</th>
+            <td>{{ '%.3f'|format(storage_overview.total_gb) }} GB</td>
+          </tr>
+          <tr>
+            <th scope="row">Active files</th>
+            <td>{{ storage_overview.active_count }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Expired files pending cleanup</th>
+            <td>{{ storage_overview.expired_count }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Storage quota limit</th>
+            <td>
+              {% if storage_quota_limit is not none %}
+                {{ '%.2f'|format(storage_quota_limit) }} GB
+              {% else %}
+                <span class="text-muted">Not configured</span>
+              {% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="settings-action-row">
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="cleanup_expired_now" />
+          <button type="submit" class="button primary">Cleanup Expired Files Now</button>
+        </form>
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="cleanup_orphaned_now" />
+          <button type="submit" class="button secondary">Remove Orphaned Files</button>
+        </form>
+      </div>
+      <p class="form-help">
+        Values reflect the current environment configuration. Future releases will allow adjusting these storage controls directly
+        within the dashboard.
+      </p>
+    </section>
+  </div>
+
   <section class="card">
     <h2>Performance Settings</h2>
     <form method="post" class="performance-form">
@@ -133,6 +105,23 @@
       <input type="hidden" name="action" value="update_performance" />
       <table class="settings-table">
         <tbody>
+          <tr>
+            <th scope="row">
+              <label for="max_upload_size_mb">Maximum upload size (MB)</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="max_upload_size_mb"
+                name="max_upload_size_mb"
+                min="1"
+                step="0.1"
+                value="{{ config.max_upload_size_mb }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
           <tr>
             <th scope="row">
               <label for="max_concurrent_uploads">Max concurrent uploads</label>
@@ -146,6 +135,7 @@
                 step="1"
                 value="{{ performance_settings.max_concurrent_uploads }}"
                 required
+                class="performance-input"
               />
             </td>
           </tr>
@@ -162,6 +152,7 @@
                 step="1"
                 value="{{ performance_settings.cleanup_interval_minutes }}"
                 required
+                class="performance-input"
               />
             </td>
           </tr>
@@ -178,6 +169,7 @@
                 step="1"
                 value="{{ performance_settings.rate_limits.upload_per_hour }}"
                 required
+                class="performance-input"
               />
             </td>
           </tr>
@@ -194,6 +186,7 @@
                 step="1"
                 value="{{ performance_settings.rate_limits.login_per_minute }}"
                 required
+                class="performance-input"
               />
             </td>
           </tr>
@@ -210,6 +203,7 @@
                 step="1"
                 value="{{ performance_settings.rate_limits.download_per_minute }}"
                 required
+                class="performance-input"
               />
             </td>
           </tr>
@@ -235,40 +229,6 @@
               {{ file_policy_settings.blocked_extensions | join(', ') }}
             {% else %}
               <span class="text-muted">None configured</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr>
-          <th scope="row">Maximum filename length</th>
-          <td>
-            {% if file_policy_settings.max_filename_length is not none %}
-              {{ file_policy_settings.max_filename_length }} characters
-            {% else %}
-              <span class="text-muted">Not configured</span>
-            {% endif %}
-          </td>
-        </tr>
-        <tr>
-          <th scope="row">Directory sharding</th>
-          <td>
-            {% if file_policy_settings.sharding_enabled is none %}
-              <span class="text-muted">Not configured (defaults apply)</span>
-            {% elif file_policy_settings.sharding_enabled %}
-              Enabled via environment
-            {% else %}
-              Disabled via environment
-            {% endif %}
-          </td>
-        </tr>
-        <tr>
-          <th scope="row">Raw download URLs</th>
-          <td>
-            {% if file_policy_settings.raw_urls_enabled is none %}
-              <span class="text-muted">Not configured (defaults apply)</span>
-            {% elif file_policy_settings.raw_urls_enabled %}
-              Enabled via environment
-            {% else %}
-              Disabled via environment
             {% endif %}
           </td>
         </tr>

@@ -186,23 +186,43 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn("second.txt", html)
 
     def test_settings_update_persists(self):
-        response = self.client.post(
+        retention_response = self.client.post(
             "/settings",
             data={
                 "action": "update_retention",
                 "retention_min_hours": "1",
                 "retention_max_hours": "48",
                 "retention_hours": "12",
-                "max_upload_size_mb": "256",
             },
             follow_redirects=True,
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(retention_response.status_code, 200)
+
+        performance_response = self.client.post(
+            "/settings",
+            data={
+                "action": "update_performance",
+                "max_upload_size_mb": "256",
+                "max_concurrent_uploads": "8",
+                "cleanup_interval_minutes": "7",
+                "upload_rate_limit_per_hour": "90",
+                "login_rate_limit_per_minute": "8",
+                "download_rate_limit_per_minute": "110",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(performance_response.status_code, 200)
+
         config = self.storage.load_config()
         self.assertEqual(config["retention_min_hours"], 1.0)
         self.assertEqual(config["retention_max_hours"], 48.0)
         self.assertEqual(config["retention_hours"], 12.0)
         self.assertEqual(config["max_upload_size_mb"], 256.0)
+        self.assertEqual(config["max_concurrent_uploads"], 8)
+        self.assertEqual(config["cleanup_interval_minutes"], 7)
+        self.assertEqual(config["upload_rate_limit_per_hour"], 90)
+        self.assertEqual(config["login_rate_limit_per_minute"], 8)
+        self.assertEqual(config["download_rate_limit_per_minute"], 110)
         self.assertFalse(config["ui_auth_enabled"])
         self.assertFalse(config["api_auth_enabled"])
         self.assertEqual(
