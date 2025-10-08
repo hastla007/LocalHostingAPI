@@ -61,8 +61,8 @@
 
       {% if pending_keys %}
         <div class="alert success">
-          Copy the newly generated API key{% if pending_keys|length > 1 %}s{% endif %} below. Each key will remain visible until
-          you confirm it has been stored safely.
+          Copy the newly generated API key{% if pending_keys|length > 1 %}s{% endif %} below. Keys remain visible for a short time
+          in this session or until you confirm they have been stored safely.
         </div>
         <ul class="pending-key-list">
           {% for pending in pending_keys %}

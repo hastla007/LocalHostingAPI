@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Generator
 from urllib.parse import quote
 
+from flask import g, has_request_context
+
 from werkzeug.security import generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -476,12 +478,20 @@ def register_file(
     expires_at = calculate_expiration(retention_hours)
     direct_path: Optional[str] = None
     max_attempts = 5
+
+    pending_paths: Optional[Set[str]] = None
+    if has_request_context():  # pragma: no branch - minimal overhead outside requests
+        pending_paths = getattr(g, "_pending_direct_paths", None)
+        if pending_paths is None:
+            pending_paths = set()
+            g._pending_direct_paths = pending_paths
+
     for attempt in range(max_attempts):
         try:
             with get_db() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 direct_path = _generate_unique_direct_path(
-                    conn, original_name, file_id
+                    conn, original_name, file_id, pending_paths
                 )
                 conn.execute(
                     """
@@ -525,6 +535,8 @@ def register_file(
                         ),
                     )
                 direct_path = fallback_candidate
+                if pending_paths is not None:
+                    pending_paths.add(fallback_candidate)
                 logger.warning(
                     "direct_path_collision_max_attempts file_id=%s original=%s fallback=%s",
                     file_id,

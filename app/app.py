@@ -170,6 +170,8 @@ from .storage import (
 _CONFIG_CACHE: Dict[str, Any] = load_config()
 _config_lock = threading.RLock()
 
+PENDING_API_KEY_TTL_SECONDS = 600
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
 logging.basicConfig(
@@ -852,26 +854,57 @@ def render_api_keys_page(config: Dict[str, Any]):
     pending_raw = session.get("pending_api_keys")
     pending_keys: List[Dict[str, Any]] = []
     session_dirty = False
+    filtered_session_entries: List[Dict[str, Any]] = []
+    now = time.time()
+
     if isinstance(pending_raw, list):
         for entry in pending_raw:
             if not isinstance(entry, dict):
                 session_dirty = True
                 continue
+
             value = entry.get("value")
-            key_id = entry.get("id") or uuid.uuid4().hex
-            if not value:
+            key_id = entry.get("id")
+            if not value or not key_id:
                 session_dirty = True
                 continue
+
             try:
-                created_at = float(entry.get("created_at", time.time()))
+                created_at = float(entry.get("created_at", now))
             except (TypeError, ValueError):
-                created_at = time.time()
-            pending_keys.append({
-                "id": key_id,
-                "value": value,
+                created_at = now
+                session_dirty = True
+
+            viewed_at_raw = entry.get("viewed_at")
+            if viewed_at_raw is None:
+                viewed_at = now
+                entry["viewed_at"] = viewed_at
+                session_dirty = True
+            else:
+                try:
+                    viewed_at = float(viewed_at_raw)
+                except (TypeError, ValueError):
+                    viewed_at = now
+                    entry["viewed_at"] = viewed_at
+                    session_dirty = True
+
+            if viewed_at and (now - viewed_at) > PENDING_API_KEY_TTL_SECONDS:
+                session_dirty = True
+                continue
+
+            normalized = {
+                "id": str(key_id),
+                "value": str(value),
                 "created_at": created_at,
-            })
-        session_dirty = session_dirty or len(pending_keys) != len(pending_raw)
+                "viewed_at": viewed_at,
+            }
+            filtered_session_entries.append(normalized)
+            pending_keys.append(normalized)
+
+        session_dirty = session_dirty or (
+            isinstance(pending_raw, list)
+            and len(filtered_session_entries) != len(pending_raw)
+        )
 
     legacy_key = session.pop("last_generated_api_key", None)
     if legacy_key:
@@ -880,19 +913,20 @@ def render_api_keys_page(config: Dict[str, Any]):
         else:
             value = str(legacy_key)
         if value:
-            pending_keys.append(
-                {
-                    "id": uuid.uuid4().hex,
-                    "value": value,
-                    "created_at": time.time(),
-                }
-            )
+            viewed_at = time.time()
+            converted = {
+                "id": uuid.uuid4().hex,
+                "value": value,
+                "created_at": viewed_at,
+                "viewed_at": viewed_at,
+            }
+            filtered_session_entries.append(converted)
+            pending_keys.append(converted)
             session_dirty = True
 
-    if pending_keys:
-        if session_dirty:
-            session["pending_api_keys"] = pending_keys
-            session.modified = True
+    if filtered_session_entries:
+        session["pending_api_keys"] = filtered_session_entries
+        session.modified = True
     elif session_dirty:
         session.pop("pending_api_keys", None)
         session.modified = True
@@ -1039,11 +1073,31 @@ def _store_pending_api_key_entry(key_id: str, raw_value: str) -> None:
 
     filtered: List[Dict[str, Any]] = []
     for entry in pending:
-        if isinstance(entry, dict) and entry.get("id") and entry.get("value"):
-            if entry.get("id") != key_id:
-                filtered.append(entry)
+        if not isinstance(entry, dict):
+            continue
+        existing_id = entry.get("id")
+        existing_value = entry.get("value")
+        if not existing_id or not existing_value:
+            continue
+        if existing_id == key_id:
+            continue
+        filtered.append(
+            {
+                "id": existing_id,
+                "value": str(existing_value),
+                "created_at": float(entry.get("created_at", time.time())),
+                "viewed_at": entry.get("viewed_at"),
+            }
+        )
 
-    filtered.append({"id": key_id, "value": raw_value, "created_at": time.time()})
+    filtered.append(
+        {
+            "id": key_id,
+            "value": raw_value,
+            "created_at": time.time(),
+            "viewed_at": None,
+        }
+    )
     session["pending_api_keys"] = filtered
     session.modified = True
 
