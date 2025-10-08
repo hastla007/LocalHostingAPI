@@ -15,7 +15,7 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from secrets import compare_digest
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -117,7 +117,7 @@ from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from flask_wtf.csrf import CSRFProtect, CSRFError, validate_csrf
+    from flask_wtf.csrf import CSRFProtect, CSRFError
     HAS_FLASK_WTF = True
 except ModuleNotFoundError:  # pragma: no cover - fallback for test environments
     HAS_FLASK_WTF = False
@@ -169,8 +169,6 @@ from .storage import (
 
 _CONFIG_CACHE: Dict[str, Any] = load_config()
 _config_lock = threading.RLock()
-
-from threading import Semaphore
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
@@ -224,6 +222,7 @@ _SECRET_KEY_VALUE: Optional[str] = None
 _api_key_serializer: Optional[URLSafeSerializer] = None
 MAX_FILENAME_LENGTH = int(os.environ.get("LOCALHOSTING_MAX_FILENAME_LENGTH", "255"))
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f\n\r]")
+API_KEY_ENCRYPTION_VERSION = 1
 
 
 def sanitize_log_value(value: Any) -> Any:
@@ -283,6 +282,52 @@ def validate_upload_mimetype(filename: str, declared_type: Optional[str]) -> boo
     return declared_major == guessed_major
 
 
+def _secret_fingerprint() -> str:
+    """Derive a stable fingerprint of the active secret key."""
+
+    secret = get_secret_key_value()
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+class UploadConcurrencyLimiter:
+    """Track active uploads and enforce a configurable concurrency cap."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._active = 0
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+
+    def acquire(self) -> bool:
+        with self._condition:
+            if self._active >= self._limit:
+                return False
+            self._active += 1
+            return True
+
+    def release(self, acquired: bool) -> None:
+        if not acquired:
+            return
+        with self._condition:
+            if self._active > 0:
+                self._active -= 1
+                self._condition.notify_all()
+
+    def update_limit(self, new_limit: int) -> None:
+        with self._condition:
+            self._limit = max(1, int(new_limit))
+            self._condition.notify_all()
+
+    def available_slots(self) -> int:
+        with self._condition:
+            return max(self._limit - self._active, 0)
+
+    @property
+    def current_limit(self) -> int:
+        with self._condition:
+            return self._limit
+
+
 class AmbiguousAPIKeyError(Exception):
     """Raised when multiple API keys are provided in a single request."""
 
@@ -291,6 +336,9 @@ def rollback_successful_uploads(file_ids: Iterable[str]) -> List[str]:
     failed: List[str] = []
     for uploaded_id in file_ids:
         try:
+            record = get_file(uploaded_id)
+            if not record:
+                continue
             if not delete_file(uploaded_id):
                 failed.append(uploaded_id)
         except Exception:
@@ -327,24 +375,6 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
             return _s3_error_response("AccessDenied", message, status_code=status_code)
         return make_response(jsonify(payload), status_code)
 
-    if ui_auth_enabled() and ui_user_authenticated():
-        if HAS_FLASK_WTF:
-            token = (
-                request.form.get("csrf_token")
-                or request.headers.get("X-CSRFToken")
-                or request.headers.get("X-CSRF-Token")
-            )
-            if token:
-                try:
-                    validate_csrf(token)
-                except Exception as error:
-                    lifecycle_logger.warning(
-                        "csrf_token_invalid path=%s error=%s",
-                        sanitize_log_value(request.path),
-                        sanitize_log_value(str(error)),
-                    )
-                    return _reject("Invalid or missing CSRF token")
-
     allowed_origin = _parse_origin(request.host_url)
     origin = _parse_origin(request.headers.get("Origin"))
     referer = _parse_origin(request.headers.get("Referer"))
@@ -357,20 +387,6 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
                 sanitize_log_value(request.path),
             )
             return _reject("Cross-site requests are not allowed")
-
-    if (
-        ui_auth_enabled()
-        and ui_user_authenticated()
-        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
-        and origin is None
-        and referer is None
-    ):
-        lifecycle_logger.warning(
-            "csrf_blocked_missing_origin path=%s ip=%s",
-            sanitize_log_value(request.path),
-            request.remote_addr or "unknown",
-        )
-        return _reject("Cross-site requests must include an Origin or Referer header")
 
     return None
 
@@ -627,7 +643,7 @@ def _memory_based_concurrency_cap(default: int) -> int:
 
 
 def _apply_concurrency_limit(config: Dict[str, Any]) -> None:
-    global upload_semaphore, max_concurrent_uploads_setting
+    global upload_limiter, max_concurrent_uploads_setting
 
     fallback_default = max(1, int(DEFAULT_MAX_CONCURRENT_UPLOADS))
     requested_limit = _coerce_positive_int(
@@ -645,7 +661,7 @@ def _apply_concurrency_limit(config: Dict[str, Any]) -> None:
         )
 
     if new_limit != max_concurrent_uploads_setting:
-        upload_semaphore = Semaphore(new_limit)
+        upload_limiter.update_limit(new_limit)
         max_concurrent_uploads_setting = new_limit
 
 
@@ -750,9 +766,20 @@ def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
     for entry in _iter_api_keys(config):
         if entry.get("id") == key_id:
             result = dict(entry)
-            plaintext = _decrypt_api_key(entry.get("key_encrypted", ""))
-            result["key"] = plaintext or ""
-            result["has_plaintext"] = bool(plaintext)
+            fingerprint = entry.get("secret_fingerprint")
+            current_fingerprint = _secret_fingerprint()
+            plaintext = ""
+            has_plaintext = False
+            if fingerprint and fingerprint != current_fingerprint:
+                logging.getLogger("localhosting.security").warning(
+                    "api_key_secret_mismatch key_id=%s", entry.get("id")
+                )
+                result["encryption_mismatch"] = True
+            else:
+                plaintext = _decrypt_api_key(entry.get("key_encrypted", "")) or ""
+                has_plaintext = bool(plaintext)
+            result["key"] = plaintext
+            result["has_plaintext"] = has_plaintext
             return result
     return None
 
@@ -822,34 +849,71 @@ def render_settings_page(config: Dict[str, Any]):
 def render_api_keys_page(config: Dict[str, Any]):
     """Render the API key management dashboard."""
 
-    new_api_key: Optional[str] = None
-    stored_key = session.get("last_generated_api_key")
-    if isinstance(stored_key, dict):
-        value = stored_key.get("value")
-        created_at = float(stored_key.get("created_at", 0))
-        viewed = bool(stored_key.get("viewed"))
-        ttl_expires = created_at + 600 if created_at else 0
+    pending_raw = session.get("pending_api_keys")
+    pending_keys: List[Dict[str, Any]] = []
+    session_dirty = False
+    if isinstance(pending_raw, list):
+        for entry in pending_raw:
+            if not isinstance(entry, dict):
+                session_dirty = True
+                continue
+            value = entry.get("value")
+            key_id = entry.get("id") or uuid.uuid4().hex
+            if not value:
+                session_dirty = True
+                continue
+            try:
+                created_at = float(entry.get("created_at", time.time()))
+            except (TypeError, ValueError):
+                created_at = time.time()
+            pending_keys.append({
+                "id": key_id,
+                "value": value,
+                "created_at": created_at,
+            })
+        session_dirty = session_dirty or len(pending_keys) != len(pending_raw)
 
-        if value and (not ttl_expires or ttl_expires > time.time()):
-            new_api_key = value
-            if viewed:
-                session.pop("last_generated_api_key", None)
-            else:
-                stored_key["viewed"] = True
-                session["last_generated_api_key"] = stored_key
-                session.modified = True
+    legacy_key = session.pop("last_generated_api_key", None)
+    if legacy_key:
+        if isinstance(legacy_key, dict):
+            value = legacy_key.get("value")
         else:
-            session.pop("last_generated_api_key", None)
-    elif stored_key is not None:
-        # Legacy string storage
-        new_api_key = str(stored_key)
-        session.pop("last_generated_api_key", None)
+            value = str(legacy_key)
+        if value:
+            pending_keys.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "value": value,
+                    "created_at": time.time(),
+                }
+            )
+            session_dirty = True
+
+    if pending_keys:
+        if session_dirty:
+            session["pending_api_keys"] = pending_keys
+            session.modified = True
+    elif session_dirty:
+        session.pop("pending_api_keys", None)
+        session.modified = True
+
+    fingerprint = _secret_fingerprint()
+    encryption_warning = any(
+        entry.get("key_encrypted")
+        and (
+            not entry.get("secret_fingerprint")
+            or entry.get("secret_fingerprint") != fingerprint
+        )
+        for entry in config.get("api_keys", [])
+        if isinstance(entry, dict)
+    )
 
     return render_template(
         "api_keys.html",
         config=config,
         api_ui_key=get_ui_api_key(config),
-        new_api_key=new_api_key,
+        pending_keys=pending_keys,
+        encryption_warning=encryption_warning,
     )
 
 
@@ -950,6 +1014,7 @@ def _generate_api_key_entry(label: str = "") -> dict:
     encrypted = _encrypt_api_key(raw_key)
     if encrypted is None:
         raise RuntimeError("Failed to encrypt API key")
+    fingerprint = _secret_fingerprint()
     return {
         "id": uuid.uuid4().hex,
         "key": raw_key,
@@ -957,7 +1022,30 @@ def _generate_api_key_entry(label: str = "") -> dict:
         "key_encrypted": encrypted,
         "label": (label or "").strip(),
         "created_at": time.time(),
+        "encryption_version": API_KEY_ENCRYPTION_VERSION,
+        "secret_fingerprint": fingerprint,
     }
+
+
+def _store_pending_api_key_entry(key_id: str, raw_value: str) -> None:
+    """Persist a generated API key in the user's session until acknowledged."""
+
+    if not raw_value:
+        return
+
+    pending = session.get("pending_api_keys")
+    if not isinstance(pending, list):
+        pending = []
+
+    filtered: List[Dict[str, Any]] = []
+    for entry in pending:
+        if isinstance(entry, dict) and entry.get("id") and entry.get("value"):
+            if entry.get("id") != key_id:
+                filtered.append(entry)
+
+    filtered.append({"id": key_id, "value": raw_value, "created_at": time.time()})
+    session["pending_api_keys"] = filtered
+    session.modified = True
 
 
 class _FallbackCleanupScheduler:
@@ -993,9 +1081,18 @@ class _FallbackCleanupScheduler:
 
 scheduler = None
 _fallback_schedulers: List[_FallbackCleanupScheduler] = []
-max_concurrent_uploads_setting = 1
+try:
+    _env_concurrency = int(
+        os.environ.get(
+            "LOCALHOSTING_MAX_CONCURRENT_UPLOADS", str(int(DEFAULT_MAX_CONCURRENT_UPLOADS))
+        )
+    )
+except (TypeError, ValueError):
+    _env_concurrency = int(DEFAULT_MAX_CONCURRENT_UPLOADS)
+
+max_concurrent_uploads_setting = max(1, _env_concurrency)
 cleanup_interval_minutes_setting = 5
-upload_semaphore = Semaphore(max_concurrent_uploads_setting)
+upload_limiter = UploadConcurrencyLimiter(max_concurrent_uploads_setting)
 
 app = Flask(__name__)
 
@@ -1081,24 +1178,14 @@ if not HAS_FLASK_WTF:
     def _inject_csrf_stub():  # pragma: no cover - used when Flask-WTF missing
         return {"csrf_token": lambda: ""}
 
-try:
-    max_concurrent_uploads = max(
-        1, int(os.environ.get("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", "10"))
-    )
-except ValueError:
-    max_concurrent_uploads = 10
-
-upload_semaphore = Semaphore(max_concurrent_uploads)
-
 
 @contextmanager
 def upload_slot() -> Iterator[bool]:
-    acquired = upload_semaphore.acquire(blocking=False)
+    acquired = upload_limiter.acquire()
     try:
         yield acquired
     finally:
-        if acquired:
-            upload_semaphore.release()
+        upload_limiter.release(acquired)
 
 
 @app.before_request
@@ -1499,6 +1586,13 @@ def health_check():
     except Exception as error:
         checks["cleanup"] = f"error: {str(error)[:100]}"
 
+    try:
+        checks["upload_limit"] = upload_limiter.current_limit
+        checks["upload_slots_available"] = upload_limiter.available_slots()
+    except Exception as error:
+        checks["upload_limit"] = "unknown"
+        checks["upload_slots_available"] = f"error: {str(error)[:100]}"
+
     status = "healthy" if healthy else "unhealthy"
     code = 200 if healthy else 503
 
@@ -1867,12 +1961,7 @@ def api_keys():
             if auto_key:
                 lifecycle_logger.info("api_key_generated id=%s", auto_key["id"])
                 if auto_key_raw:
-                    session["last_generated_api_key"] = {
-                        "value": auto_key_raw,
-                        "created_at": time.time(),
-                        "viewed": False,
-                    }
-                    session.modified = True
+                    _store_pending_api_key_entry(auto_key["id"], auto_key_raw)
                     flash(f"Generated new API key: {escape(auto_key_raw)}", "success")
                     flash("Copy this key now! You won't be able to see it again.", "warning")
                 flash(
@@ -1908,12 +1997,7 @@ def api_keys():
                 sanitize_log_value(label or ""),
             )
             if new_key_raw:
-                session["last_generated_api_key"] = {
-                    "value": new_key_raw,
-                    "created_at": time.time(),
-                    "viewed": False,
-                }
-                session.modified = True
+                _store_pending_api_key_entry(new_key["id"], new_key_raw)
                 flash(f"Generated new API key: {escape(new_key_raw)}", "success")
                 flash("Copy this key now! You won't be able to see it again.", "warning")
 
@@ -1952,6 +2036,25 @@ def api_keys():
 
             lifecycle_logger.info("api_key_promoted id=%s", key_id)
             flash("Dashboard uploads will use the selected API key.", "success")
+
+        elif action == "acknowledge_api_key":
+            pending_id = request.form.get("pending_key_id", "").strip()
+            pending = session.get("pending_api_keys")
+            if isinstance(pending, list):
+                remaining = [
+                    entry
+                    for entry in pending
+                    if isinstance(entry, dict) and entry.get("id") != pending_id
+                ]
+                if remaining:
+                    session["pending_api_keys"] = remaining
+                else:
+                    session.pop("pending_api_keys", None)
+                session.modified = True
+            lifecycle_logger.info(
+                "api_key_pending_acknowledged key_id=%s", pending_id or "unknown"
+            )
+            flash("Pending API key hidden. Ensure the value is stored securely.", "info")
 
         else:
             flash("Unsupported API key action.", "error")
@@ -2753,13 +2856,24 @@ def serve_raw_file(direct_path: str):
     if not normalized:
         abort(404)
 
-    if ".." in normalized or "\\" in normalized or normalized.startswith("/"):
+    if "\\" in normalized:
         lifecycle_logger.warning(
             "path_traversal_attempt path=%s ip=%s",
             sanitize_log_value(direct_path),
             request.remote_addr or "unknown",
         )
         abort(404)
+
+    path_candidate = PurePosixPath(normalized)
+    if path_candidate.is_absolute() or any(part in {"..", ""} for part in path_candidate.parts):
+        lifecycle_logger.warning(
+            "path_traversal_attempt path=%s ip=%s",
+            sanitize_log_value(direct_path),
+            request.remote_addr or "unknown",
+        )
+        abort(404)
+
+    normalized = path_candidate.as_posix()
 
     first_segment = normalized.split("/", 1)[0]
     first_segment_lower = first_segment.lower()

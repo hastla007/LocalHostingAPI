@@ -180,6 +180,13 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
                 encrypted_value = ""
                 if isinstance(entry.get("key_encrypted"), str):
                     encrypted_value = entry.get("key_encrypted").strip()
+                try:
+                    encryption_version = int(entry.get("encryption_version", 0))
+                except (TypeError, ValueError):
+                    encryption_version = 0
+                secret_fingerprint = ""
+                if isinstance(entry.get("secret_fingerprint"), str):
+                    secret_fingerprint = entry.get("secret_fingerprint").strip()
                 cleaned_items.append(
                     {
                         "id": entry_id,
@@ -187,6 +194,8 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
                         "key_encrypted": encrypted_value,
                         "label": label.strip(),
                         "created_at": created_at,
+                        "encryption_version": encryption_version,
+                        "secret_fingerprint": secret_fingerprint,
                     }
                 )
             unique_items = []

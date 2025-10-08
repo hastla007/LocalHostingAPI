@@ -326,14 +326,12 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(config["download_rate_limit_per_minute"], 80.0)
 
         self.assertEqual(self.app_module.max_concurrent_uploads_setting, 7)
-        acquired = [
-            self.app_module.upload_semaphore.acquire(blocking=False)
-            for _ in range(7)
-        ]
+        limiter = self.app_module.upload_limiter
+        acquired = [limiter.acquire() for _ in range(7)]
         self.assertTrue(all(acquired))
-        self.assertFalse(self.app_module.upload_semaphore.acquire(blocking=False))
-        for _ in acquired:
-            self.app_module.upload_semaphore.release()
+        self.assertFalse(limiter.acquire())
+        for flag in acquired:
+            limiter.release(flag)
 
         self.assertEqual(self.app_module.cleanup_interval_minutes_setting, 9)
         self.assertEqual(self.app_module.upload_rate_limit_string(), "75 per hour")
@@ -739,11 +737,12 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(enable.status_code, 302)
 
         with self.client.session_transaction() as session:
-            stored_key = session.get("last_generated_api_key")
-            if isinstance(stored_key, dict):
-                api_key = stored_key.get("value")
+            pending = session.get("pending_api_keys")
+            if isinstance(pending, list) and pending:
+                first = pending[0]
+                api_key = first.get("value")
             else:
-                api_key = stored_key
+                api_key = None
 
         self.assertIsNotNone(api_key)
         self.client.get(enable.headers["Location"], follow_redirects=True)
@@ -753,6 +752,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertTrue(config["api_keys"])
         self.assertIn("key_hash", config["api_keys"][0])
         self.assertIn("key_encrypted", config["api_keys"][0])
+        self.assertIn("encryption_version", config["api_keys"][0])
+        self.assertIn("secret_fingerprint", config["api_keys"][0])
         self.assertTrue(config["api_keys"][0]["key_encrypted"])
         self.assertNotIn("key", config["api_keys"][0])
 
@@ -786,11 +787,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             follow_redirects=False,
         )
         with self.client.session_transaction() as session:
-            stored_key = session.get("last_generated_api_key")
-            if isinstance(stored_key, dict):
-                api_key = stored_key.get("value")
+            pending = session.get("pending_api_keys")
+            if isinstance(pending, list) and pending:
+                api_key = pending[0].get("value")
             else:
-                api_key = stored_key
+                api_key = None
 
         self.assertIsNotNone(api_key)
         self.client.get(enable.headers["Location"], follow_redirects=True)
@@ -836,6 +837,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertTrue(original_keys)
         initial_id = original_keys[0]["id"]
         self.assertIn("key_hash", original_keys[0])
+        self.assertIn("secret_fingerprint", original_keys[0])
 
         generate = self.client.post(
             "/apikeys",
@@ -843,8 +845,9 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             follow_redirects=False,
         )
         with self.client.session_transaction() as session:
-            stored_key = session.get("last_generated_api_key")
-        self.assertIsNotNone(stored_key)
+            pending = session.get("pending_api_keys")
+        self.assertIsInstance(pending, list)
+        self.assertTrue(pending)
         self.client.get(generate.headers["Location"], follow_redirects=True)
         config = self.storage.load_config()
         self.assertGreaterEqual(len(config["api_keys"]), 2)

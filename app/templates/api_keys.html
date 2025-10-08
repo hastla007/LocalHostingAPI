@@ -52,16 +52,40 @@
         <button type="submit" class="button primary">Generate API Key</button>
       </form>
 
-      {% if new_api_key %}
+      {% if encryption_warning %}
+        <div class="alert warning">
+          Existing API keys cannot be decrypted with the current secret key. Generate new keys to restore browser access to
+          plaintext values.
+        </div>
+      {% endif %}
+
+      {% if pending_keys %}
         <div class="alert success">
-          Copy your newly generated API key below. It will not be shown again.
+          Copy the newly generated API key{% if pending_keys|length > 1 %}s{% endif %} below. Each key will remain visible until
+          you confirm it has been stored safely.
         </div>
-        <div class="api-key-value new-key-display">
-          <input type="text" id="new-api-key" value="{{ new_api_key }}" readonly />
-          <button type="button" class="button primary" onclick="copyApiKeyValue('new-api-key')">
-            📋 Copy
-          </button>
-        </div>
+        <ul class="pending-key-list">
+          {% for pending in pending_keys %}
+            <li class="pending-key-item">
+              <div class="api-key-value new-key-display">
+                <input type="text" id="new-api-key-{{ loop.index }}" value="{{ pending.value }}" readonly />
+                <button
+                  type="button"
+                  class="button primary"
+                  onclick="copyApiKeyValue('new-api-key-{{ loop.index }}')"
+                >
+                  📋 Copy
+                </button>
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="acknowledge_api_key" />
+                  <input type="hidden" name="pending_key_id" value="{{ pending.id }}" />
+                  <button type="submit" class="button secondary">I have stored this key</button>
+                </form>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
       {% endif %}
 
       {% if config.api_keys %}
