@@ -1,5 +1,6 @@
 import atexit
 import hashlib
+import math
 import json
 import logging
 import mimetypes
@@ -17,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from secrets import compare_digest
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode as _compat_urlencode, urlparse, unquote
@@ -150,6 +151,7 @@ from .storage import (
     cleanup_expired_files,
     cleanup_orphaned_files,
     cleanup_temp_files,
+    count_files,
     delete_file,
     ensure_directories,
     get_db,
@@ -237,6 +239,17 @@ def sanitize_log_value(value: Any) -> Any:
     return value
 
 
+def blocked_extensions() -> Set[str]:
+    """Return the configured set of blocked file extensions."""
+
+    raw_value = os.environ.get("LOCALHOSTING_BLOCKED_EXTENSIONS", "")
+    return {
+        entry.strip().lower().lstrip(".")
+        for entry in raw_value.split(",")
+        if entry.strip()
+    }
+
+
 def validate_filename(filename: str) -> tuple[bool, Optional[str]]:
     """Validate filenames for length and disallowed characters."""
 
@@ -251,6 +264,15 @@ def validate_filename(filename: str) -> tuple[bool, Optional[str]]:
 
     if "\x00" in filename:
         return False, "Filename contains invalid characters"
+
+    blocked = blocked_extensions()
+    if blocked:
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if extension and extension in blocked:
+            return (
+                False,
+                f"File extension '.{extension}' is not allowed",
+            )
 
     return True, None
 
@@ -350,6 +372,15 @@ def rollback_successful_uploads(file_ids: Iterable[str]) -> List[str]:
             )
             failed.append(uploaded_id)
     return failed
+
+
+def storage_quota_limit_bytes() -> Optional[int]:
+    """Return the configured storage quota in bytes, if any."""
+
+    limit_gb = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
+    if limit_gb is None or limit_gb <= 0:
+        return None
+    return int(limit_gb * (1024 ** 3))
 
 
 def _parse_origin(value: Optional[str]) -> Optional[str]:
@@ -716,10 +747,10 @@ def get_config(refresh: bool = False) -> Dict[str, Any]:
         if has_request_context():
             cached = getattr(g, "_app_config", None)
             if cached is None or refresh:
-                g._app_config = deepcopy(_CONFIG_CACHE)
+                g._app_config = _CONFIG_CACHE
             config = g._app_config
         else:
-            config = deepcopy(_CONFIG_CACHE)
+            config = _CONFIG_CACHE
 
     _apply_runtime_settings(config)
     return config
@@ -1635,17 +1666,23 @@ def health_check():
                 checks["cleanup_next_run"] = job.next_run_time.isoformat()
             else:
                 checks["cleanup"] = "not_scheduled"
+            checks["scheduler_running"] = bool(scheduler.running)
         else:
             checks["cleanup"] = "fallback_scheduler"
+            checks["scheduler_running"] = False
     except Exception as error:
         checks["cleanup"] = f"error: {str(error)[:100]}"
+        checks["scheduler_running"] = False
 
     try:
         checks["upload_limit"] = upload_limiter.current_limit
-        checks["upload_slots_available"] = upload_limiter.available_slots()
+        available_slots = upload_limiter.available_slots()
+        checks["upload_slots_available"] = available_slots
+        checks["semaphore_available"] = available_slots
     except Exception as error:
         checks["upload_limit"] = "unknown"
         checks["upload_slots_available"] = f"error: {str(error)[:100]}"
+        checks["semaphore_available"] = f"error: {str(error)[:100]}"
 
     status = "healthy" if healthy else "unhealthy"
     code = 200 if healthy else 503
@@ -1669,31 +1706,24 @@ def hosting():
     search = request.args.get("search", "").strip()
     sort_by = request.args.get("sort", "uploaded_at")
     sort_order = request.args.get("order", "desc").lower()
+    if sort_by not in {"name", "size", "uploaded_at", "expires_at"}:
+        sort_by = "uploaded_at"
     sort_order = sort_order if sort_order in {"asc", "desc"} else "desc"
 
-    files = list(iter_files(list_files()))
-
-    if search:
-        lowered = search.lower()
-        files = [file for file in files if lowered in file["original_name"].lower()]
-
-    sort_key_map = {
-        "name": lambda f: f["original_name"].lower(),
-        "size": lambda f: f["size"],
-        "uploaded_at": lambda f: f["uploaded_at"],
-        "expires_at": lambda f: f["expires_at"],
-    }
-    sort_key = sort_key_map.get(sort_by, sort_key_map["uploaded_at"])
-    reverse = sort_order != "asc"
-    files.sort(key=sort_key, reverse=reverse)
-
-    total_files = len(files)
-    total_pages = max(1, (total_files + per_page - 1) // per_page)
+    total_files = count_files(search_term=search or None)
+    total_pages = max(1, math.ceil(total_files / per_page)) if total_files else 1
     if page > total_pages:
         page = total_pages
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_files = files[start:end]
+    offset = (page - 1) * per_page
+
+    records = list_files(
+        limit=per_page,
+        offset=offset,
+        search_term=search or None,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+    page_files = list(iter_files(records))
 
     for file in page_files:
         file["download_url"] = url_for("download", file_id=file["id"])
@@ -2246,6 +2276,81 @@ def fileupload():
             return jsonify({"error": "No file selected"}), 400
 
         config = get_config()
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=507,
+                )
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(request.form.get("key") or request.form.get("Key") or upload.filename or ""),
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=request.form.get("key") or request.form.get("Key") or upload.filename,
+                    status_code=507,
+                )
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s", bucket, sanitize_log_value(key)
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=507,
+                )
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s", bucket, sanitize_log_value(key)
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=507,
+                )
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                return jsonify({"error": "Storage quota exceeded"}), 507
         payload = request.get_json(silent=True) if request.is_json else None
         try:
             retention_hours = resolve_retention(
@@ -2320,6 +2425,26 @@ def fileupload():
 
                 temp_path.replace(upload_path)
                 size = written if written else upload_path.stat().st_size
+
+                if quota_limit_bytes is not None:
+                    if current_usage is None:
+                        stats = get_storage_statistics()
+                        current_usage = stats.get("total_bytes", 0)
+                    if current_usage + size > quota_limit_bytes:
+                        if upload_path.exists():
+                            upload_path.unlink(missing_ok=True)
+                            prune_empty_upload_dirs(upload_path.parent)
+                        failures.append(
+                            {
+                                "filename": filename,
+                                "reason": "quota_exceeded",
+                                "detail": "Storage quota exceeded",
+                            }
+                        )
+                        lifecycle_logger.warning(
+                            "upload_quota_exceeded file_id=%s filename=%s", file_id, sanitize_log_value(filename)
+                        )
+                        continue
 
                 file_id = register_file(
                     original_name=filename,
@@ -2409,6 +2534,8 @@ def fileupload():
                 }
             )
             successful_file_ids.append(file_id)
+            if quota_limit_bytes is not None and current_usage is not None:
+                current_usage += size
 
         if failures:
             failed_rollbacks = rollback_successful_uploads(successful_file_ids)
@@ -2417,7 +2544,12 @@ def fileupload():
                     "rollback_incomplete file_ids=%s",
                     [sanitize_log_value(value) for value in failed_rollbacks],
                 )
-            status = 413 if any(entry.get("reason") == "too_large" for entry in failures) else 400
+            if any(entry.get("reason") == "quota_exceeded" for entry in failures):
+                status = 507
+            elif any(entry.get("reason") == "too_large" for entry in failures):
+                status = 413
+            else:
+                status = 400
             payload: Dict[str, Any] = {
                 "message": "Failed to upload files.",
                 "errors": failures,
@@ -2588,6 +2720,18 @@ def box_upload_files():
             }
             return _box_error("retention_invalid", str(error), context=context)
 
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                return _box_error(
+                    "storage_quota_exceeded",
+                    "Storage quota exceeded.",
+                    status=507,
+                )
+
         entries = []
         successful_file_ids: List[str] = []
         for upload in uploads:
@@ -2664,6 +2808,34 @@ def box_upload_files():
                     if max_bytes and size > max_bytes:
                         raise ValueError("file too large")
                     content_type = upload.content_type
+
+                    if quota_limit_bytes is not None:
+                        if current_usage is None:
+                            stats = get_storage_statistics()
+                            current_usage = stats.get("total_bytes", 0)
+                        if current_usage + size > quota_limit_bytes:
+                            if upload_path.exists():
+                                upload_path.unlink(missing_ok=True)
+                                prune_empty_upload_dirs(upload_path.parent)
+                            lifecycle_logger.warning(
+                                "box_upload_quota_exceeded file_id=%s filename=%s",
+                                file_id,
+                                sanitize_log_value(filename),
+                            )
+                            failed_rollbacks = rollback_successful_uploads(successful_file_ids)
+                            if failed_rollbacks:
+                                lifecycle_logger.error(
+                                    "rollback_incomplete file_ids=%s",
+                                    [sanitize_log_value(value) for value in failed_rollbacks],
+                                )
+                            return _box_error(
+                                "storage_quota_exceeded",
+                                "Storage quota exceeded.",
+                                status=507,
+                                context={"rollback_failed_ids": failed_rollbacks}
+                                if failed_rollbacks
+                                else None,
+                            )
                 finally:
                     if hasattr(upload.stream, "close"):
                         try:
@@ -2808,6 +2980,8 @@ def box_upload_files():
                 retention_hours,
             )
             successful_file_ids.append(file_id)
+            if quota_limit_bytes is not None and current_usage is not None:
+                current_usage += size
 
         if not entries:
             return _box_error("no_valid_files", "No valid files were provided.")
@@ -3084,6 +3258,25 @@ def s3_multipart_upload(bucket: str):
                 status_code=400,
             )
 
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=507,
+                )
+
         if not validate_upload_mimetype(filename, upload.content_type):
             lifecycle_logger.warning(
                 "s3_upload_suspicious_mimetype bucket=%s key=%s filename=%s declared=%s",
@@ -3129,6 +3322,46 @@ def s3_multipart_upload(bucket: str):
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
+            if quota_limit_bytes is not None:
+                if current_usage is None:
+                    stats = get_storage_statistics()
+                    current_usage = stats.get("total_bytes", 0)
+                if current_usage + size > quota_limit_bytes:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                        prune_empty_upload_dirs(upload_path.parent)
+                    lifecycle_logger.warning(
+                        "s3_upload_quota_exceeded bucket=%s key=%s",
+                        bucket,
+                        sanitize_log_value(key),
+                    )
+                    return _s3_error_response(
+                        "InsufficientStorage",
+                        "Storage quota exceeded.",
+                        bucket=bucket,
+                        key=key,
+                        status_code=507,
+                    )
+            if quota_limit_bytes is not None:
+                if current_usage is None:
+                    stats = get_storage_statistics()
+                    current_usage = stats.get("total_bytes", 0)
+                if current_usage + size > quota_limit_bytes:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                        prune_empty_upload_dirs(upload_path.parent)
+                    lifecycle_logger.warning(
+                        "s3_upload_quota_exceeded bucket=%s key=%s",
+                        bucket,
+                        sanitize_log_value(key),
+                    )
+                    return _s3_error_response(
+                        "InsufficientStorage",
+                        "Storage quota exceeded.",
+                        bucket=bucket,
+                        key=key,
+                        status_code=507,
+                    )
         except ValueError:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
@@ -3309,6 +3542,24 @@ def s3_put_object(bucket: str, key: str):
                 key=key,
                 status_code=400,
             )
+        quota_limit_bytes = storage_quota_limit_bytes()
+        current_usage = None
+        if quota_limit_bytes is not None:
+            stats = get_storage_statistics()
+            current_usage = stats.get("total_bytes", 0)
+            if current_usage >= quota_limit_bytes:
+                lifecycle_logger.warning(
+                    "s3_upload_quota_exceeded bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InsufficientStorage",
+                    "Storage quota exceeded.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=507,
+                )
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
         upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
@@ -3481,23 +3732,23 @@ def s3_put_object(bucket: str, key: str):
         else:
             location = url_for("download", file_id=file_id, _external=True)
 
-        lifecycle_logger.info(
-            "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
-            file_id,
-            bucket,
-            sanitize_log_value(key),
-            size,
-            retention_hours,
-        )
+    lifecycle_logger.info(
+        "file_uploaded_s3_put file_id=%s bucket=%s key=%s size=%d retention_hours=%.2f",
+        file_id,
+        bucket,
+        sanitize_log_value(key),
+        size,
+        retention_hours,
+    )
 
-        response = _build_s3_put_success(
-            bucket,
-            key,
-            location,
-            hash_md5.hexdigest(),
-        )
-        response.headers["x-localhosting-file-id"] = file_id
-        return response
+    response = _build_s3_put_success(
+        bucket,
+        key,
+        location,
+        hash_md5.hexdigest(),
+    )
+    response.headers["x-localhosting-file-id"] = file_id
+    return response
 
 
 @app.errorhandler(404)

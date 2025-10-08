@@ -33,6 +33,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             "LOCALHOSTING_UPLOADS_DIR",
             "LOCALHOSTING_LOGS_DIR",
             "LOCALHOSTING_DOCKER_LOG_PATH",
+            "LOCALHOSTING_BLOCKED_EXTENSIONS",
+            "LOCALHOSTING_STORAGE_QUOTA_GB",
         ]:
             os.environ.pop(key, None)
         for module in ["app.app", "app.storage", "app"]:
@@ -152,6 +154,49 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             if directory.is_dir() and not any(directory.iterdir())
         ]
         self.assertEqual(len(empty_dirs), 0)
+
+    def test_blocked_extension_rejected(self):
+        os.environ["LOCALHOSTING_BLOCKED_EXTENSIONS"] = "exe"
+        self._reload_app()
+        self.app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
+        self.client = self.app.test_client()
+
+        response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"malware"), "payload.exe"),
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertIsInstance(payload, dict)
+        self.assertIn("errors", payload)
+        reasons = {entry.get("reason") for entry in payload["errors"]}
+        self.assertIn("invalid_filename", reasons)
+
+        uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
+        self.assertFalse(any(uploads_dir.rglob("*.exe")))
+
+    def test_storage_quota_enforced(self):
+        os.environ["LOCALHOSTING_STORAGE_QUOTA_GB"] = "0.000001"  # ~1 KB
+
+        response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"x" * 2048), "large.bin"),
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 507)
+        payload = response.get_json()
+        self.assertIsInstance(payload, dict)
+        self.assertIn("message", payload)
+
+        uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
+        self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
 
     def test_multi_file_upload_support(self):
         response = self.client.post(

@@ -560,16 +560,75 @@ def register_file(
     return file_id
 
 
-def list_files(include_expired: bool = False) -> List[sqlite3.Row]:
+def list_files(
+    include_expired: bool = False,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    search_term: Optional[str] = None,
+    sort_by: str = "uploaded_at",
+    sort_order: str = "desc",
+) -> List[sqlite3.Row]:
     with get_db() as conn:
-        if include_expired:
-            cursor = conn.execute("SELECT * FROM files ORDER BY uploaded_at DESC")
-        else:
-            cursor = conn.execute(
-                "SELECT * FROM files WHERE expires_at >= ? ORDER BY uploaded_at DESC",
-                (time.time(),),
-            )
+        params: List[object] = []
+        clauses: List[str] = []
+
+        if not include_expired:
+            clauses.append("expires_at >= ?")
+            params.append(time.time())
+
+        if search_term:
+            clauses.append("LOWER(original_name) LIKE ?")
+            params.append(f"%{search_term.lower()}%")
+
+        base_query = "SELECT * FROM files"
+        if clauses:
+            base_query += " WHERE " + " AND ".join(clauses)
+
+        sort_map = {
+            "name": "original_name",
+            "size": "size",
+            "uploaded_at": "uploaded_at",
+            "expires_at": "expires_at",
+        }
+        column = sort_map.get(sort_by, "uploaded_at")
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+        base_query += f" ORDER BY {column} {direction}"
+
+        if limit is not None:
+            limit_value = max(int(limit), 0)
+            offset_value = max(int(offset), 0)
+            base_query += " LIMIT ? OFFSET ?"
+            params.extend([limit_value, offset_value])
+
+        cursor = conn.execute(base_query, tuple(params))
         return cursor.fetchall()
+
+
+def count_files(
+    include_expired: bool = False,
+    *,
+    search_term: Optional[str] = None,
+) -> int:
+    with get_db() as conn:
+        params: List[object] = []
+        clauses: List[str] = []
+
+        if not include_expired:
+            clauses.append("expires_at >= ?")
+            params.append(time.time())
+
+        if search_term:
+            clauses.append("LOWER(original_name) LIKE ?")
+            params.append(f"%{search_term.lower()}%")
+
+        base_query = "SELECT COUNT(*) AS count FROM files"
+        if clauses:
+            base_query += " WHERE " + " AND ".join(clauses)
+
+        cursor = conn.execute(base_query, tuple(params))
+        row = cursor.fetchone()
+        return int(row["count"] if row and row["count"] is not None else 0)
 
 
 def get_file(file_id: str) -> Optional[sqlite3.Row]:
@@ -594,7 +653,6 @@ def delete_file(file_id: str) -> bool:
             if file_path.exists():
                 try:
                     file_path.unlink()
-                    prune_empty_upload_dirs(file_path.parent)
                 except OSError as error:
                     logger.warning(
                         "file_delete_disk_failed file_id=%s path=%s error=%s",
