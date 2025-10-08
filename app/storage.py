@@ -514,34 +514,55 @@ def register_file(
             if "direct_path" not in str(error):
                 raise
             if attempt == max_attempts - 1:
+                params = (
+                    file_id,
+                    original_name,
+                    stored_name,
+                    content_type,
+                    size,
+                    uploaded_at,
+                    expires_at,
+                )
                 fallback_base = secure_filename(original_name) or "file"
-                fallback_candidate = f"{file_id}-{fallback_base[:50]}"
-                with get_db() as conn:
-                    conn.execute("BEGIN IMMEDIATE")
-                    conn.execute(
-                        """
-                        INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            file_id,
-                            original_name,
-                            stored_name,
-                            content_type,
-                            size,
-                            uploaded_at,
-                            expires_at,
-                            fallback_candidate,
-                        ),
-                    )
-                direct_path = fallback_candidate
-                if pending_paths is not None:
-                    pending_paths.add(fallback_candidate)
+                fallback_options = [
+                    f"{uuid.uuid4().hex[:8]}-{fallback_base[:50]}",
+                    f"{uuid.uuid4().hex}-{fallback_base[:50]}",
+                ]
+
+                inserted = False
+                last_error: Optional[sqlite3.IntegrityError] = None
+                for fallback_candidate in fallback_options:
+                    try:
+                        with get_db() as conn:
+                            conn.execute("BEGIN IMMEDIATE")
+                            conn.execute(
+                                """
+                                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                params + (fallback_candidate,),
+                            )
+                        direct_path = fallback_candidate
+                        inserted = True
+                        break
+                    except sqlite3.IntegrityError as final_error:
+                        last_error = final_error
+                        if "direct_path" not in str(final_error):
+                            raise
+                        continue
+
+                if not inserted:
+                    if last_error is not None:
+                        raise last_error
+                    raise
+
+                if pending_paths is not None and direct_path:
+                    pending_paths.add(direct_path)
                 logger.warning(
                     "direct_path_collision_max_attempts file_id=%s original=%s fallback=%s",
                     file_id,
                     original_name,
-                    fallback_candidate,
+                    direct_path,
                 )
                 break
             # Exponential backoff to avoid hammering the unique constraint when

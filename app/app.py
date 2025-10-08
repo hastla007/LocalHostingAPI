@@ -1262,6 +1262,19 @@ def _close_stream_safely(stream: Any, context: str) -> None:
         )
 
 
+@contextmanager
+def upload_stream_handler(file_storage: FileStorage) -> Iterator[FileStorage]:
+    """Ensure uploaded file streams are always closed."""
+
+    try:
+        yield file_storage
+    finally:
+        _close_stream_safely(
+            getattr(file_storage, "stream", None),
+            f"upload_stream_handler filename={getattr(file_storage, 'filename', 'unknown')}",
+        )
+
+
 if not HAS_FLASK_WTF:
 
     @app.context_processor
@@ -2328,22 +2341,22 @@ def fileupload():
         results = []
         failures: List[Dict[str, str]] = []
         successful_uploads: List[Tuple[str, str]] = []
-        for upload, filename in valid_uploads:
+        for upload_storage, filename in valid_uploads:
             upload_path = None
             temp_path = None
             file_id = str(uuid.uuid4())
             stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-            try:
-                upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-                temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
-                if hasattr(upload.stream, "seek"):
-                    try:
-                        upload.stream.seek(0)
-                    except (OSError, IOError):
-                        pass
-                written = 0
-                too_large = False
+            with upload_stream_handler(upload_storage) as upload:
                 try:
+                    upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+                    temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
+                    if hasattr(upload.stream, "seek"):
+                        try:
+                            upload.stream.seek(0)
+                        except (OSError, IOError):
+                            pass
+                    written = 0
+                    too_large = False
                     with temp_path.open("wb") as destination:
                         while True:
                             chunk = upload.stream.read(1024 * 1024)
@@ -2354,81 +2367,72 @@ def fileupload():
                                 break
                             destination.write(chunk)
                             written += len(chunk)
-                finally:
-                    _close_stream_safely(
-                        getattr(upload, "stream", None),
-                        f"fileupload file_id={file_id}",
-                    )
 
-                if too_large:
-                    if temp_path and temp_path.exists():
-                        parent = temp_path.parent
-                        temp_path.unlink(missing_ok=True)
-                        prune_empty_upload_dirs(parent)
-                    failures.append(
-                        {
-                            "filename": filename,
-                            "reason": "too_large",
-                        }
-                    )
-                    continue
-
-                temp_path.replace(upload_path)
-                size = written if written else upload_path.stat().st_size
-
-                try:
-                    with quota_lock:
-                        enforce_storage_quota_for_size(size)
-                        file_id = register_file(
-                            original_name=filename,
-                            stored_name=stored_name,
-                            content_type=upload.content_type,
-                            size=size,
-                            retention_hours=retention_hours,
-                            file_id=file_id,
+                    if too_large:
+                        if temp_path and temp_path.exists():
+                            parent = temp_path.parent
+                            temp_path.unlink(missing_ok=True)
+                            prune_empty_upload_dirs(parent)
+                        failures.append(
+                            {
+                                "filename": filename,
+                                "reason": "too_large",
+                            }
                         )
-                except StorageQuotaExceededError as quota_error:
-                    if upload_path.exists():
+                        continue
+
+                    temp_path.replace(upload_path)
+                    size = written if written else upload_path.stat().st_size
+
+                    try:
+                        with quota_lock:
+                            enforce_storage_quota_for_size(size)
+                            file_id = register_file(
+                                original_name=filename,
+                                stored_name=stored_name,
+                                content_type=upload.content_type,
+                                size=size,
+                                retention_hours=retention_hours,
+                                file_id=file_id,
+                            )
+                    except StorageQuotaExceededError as quota_error:
+                        if upload_path.exists():
+                            upload_path.unlink(missing_ok=True)
+                            prune_empty_upload_dirs(upload_path.parent)
+                        failures.append(
+                            {
+                                "filename": filename,
+                                "reason": "quota_exceeded",
+                                "detail": "Storage quota exceeded",
+                            }
+                        )
+                        lifecycle_logger.warning(
+                            "upload_quota_exceeded file_id=%s filename=%s usage=%d limit=%d",
+                            file_id,
+                            sanitize_log_value(filename),
+                            quota_error.current_usage,
+                            quota_error.quota_limit,
+                        )
+                        continue
+                except Exception as error:
+                    lifecycle_logger.exception(
+                        "file_upload_failed file_id=%s filename=%s",
+                        file_id,
+                        sanitize_log_value(filename),
+                    )
+                    if temp_path and temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
+                    if upload_path and upload_path.exists():
                         upload_path.unlink(missing_ok=True)
                         prune_empty_upload_dirs(upload_path.parent)
                     failures.append(
                         {
                             "filename": filename,
-                            "reason": "quota_exceeded",
-                            "detail": "Storage quota exceeded",
+                            "reason": "internal_error",
+                            "detail": str(error),
                         }
                     )
-                    lifecycle_logger.warning(
-                        "upload_quota_exceeded file_id=%s filename=%s usage=%d limit=%d",
-                        file_id,
-                        sanitize_log_value(filename),
-                        quota_error.current_usage,
-                        quota_error.quota_limit,
-                    )
                     continue
-            except Exception as error:
-                lifecycle_logger.exception(
-                    "file_upload_failed file_id=%s filename=%s",
-                    file_id,
-                    sanitize_log_value(filename),
-                )
-                _close_stream_safely(
-                    getattr(upload, "stream", None),
-                    f"fileupload-exception file_id={file_id}",
-                )
-                if temp_path and temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
-                if upload_path and upload_path.exists():
-                    upload_path.unlink(missing_ok=True)
-                    prune_empty_upload_dirs(upload_path.parent)
-                failures.append(
-                    {
-                        "filename": filename,
-                        "reason": "internal_error",
-                        "detail": str(error),
-                    }
-                )
-                continue
 
             record = get_file(file_id)
             if not record:
@@ -2740,11 +2744,12 @@ def box_upload_files():
                     upload.content_type,
                 )
 
-            try:
+            content_type: Optional[str] = None
+            with upload_stream_handler(upload) as managed_upload:
                 try:
                     with temp_path.open("wb") as destination:
                         while True:
-                            chunk = upload.stream.read(1024 * 1024)
+                            chunk = managed_upload.stream.read(1024 * 1024)
                             if not chunk:
                                 break
                             destination.write(chunk)
@@ -2757,35 +2762,13 @@ def box_upload_files():
                     size = written if written else upload_path.stat().st_size
                     if max_bytes and size > max_bytes:
                         raise ValueError("file too large")
-                    content_type = upload.content_type
-                finally:
-                    _close_stream_safely(
-                        getattr(upload, "stream", None),
-                        f"box-upload file_id={file_id}",
-                    )
-
-                try:
-                    with quota_lock:
-                        enforce_storage_quota_for_size(size)
-                        file_id = register_file(
-                            original_name=filename,
-                            stored_name=stored_name,
-                            content_type=content_type,
-                            size=size,
-                            retention_hours=retention_hours,
-                            file_id=file_id,
-                        )
-                except StorageQuotaExceededError as quota_error:
+                    content_type = managed_upload.content_type
+                except ValueError:
+                    if temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
                     if upload_path.exists():
                         upload_path.unlink(missing_ok=True)
                         prune_empty_upload_dirs(upload_path.parent)
-                    lifecycle_logger.warning(
-                        "box_upload_quota_exceeded file_id=%s filename=%s usage=%d limit=%d",
-                        file_id,
-                        sanitize_log_value(filename),
-                        quota_error.current_usage,
-                        quota_error.quota_limit,
-                    )
                     failed_rollbacks = rollback_successful_uploads(successful_uploads)
                     if failed_rollbacks:
                         lifecycle_logger.error(
@@ -2793,63 +2776,77 @@ def box_upload_files():
                             [sanitize_log_value(value) for value in failed_rollbacks],
                         )
                     return _box_error(
-                        "storage_quota_exceeded",
-                        "Storage quota exceeded.",
-                        status=507,
+                        "file_too_large",
+                        "The uploaded file exceeds the allowed size.",
+                        status=413,
                         context={"rollback_failed_ids": failed_rollbacks}
                         if failed_rollbacks
                         else None,
                     )
-                successful_uploads.append((file_id, stored_name))
-            except ValueError:
-                if temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
-                if upload_path.exists():
-                    upload_path.unlink(missing_ok=True)
-                    prune_empty_upload_dirs(upload_path.parent)
-                _close_stream_safely(
-                    getattr(upload, "stream", None),
-                    f"box-upload-too-large file_id={file_id}",
-                )
-                failed_rollbacks = rollback_successful_uploads(successful_uploads)
-                if failed_rollbacks:
-                    lifecycle_logger.error(
-                        "rollback_incomplete file_ids=%s",
-                        [sanitize_log_value(value) for value in failed_rollbacks],
+                except Exception as error:
+                    lifecycle_logger.exception(
+                        "box_upload_failed reason=internal_error filename=%s",
+                        sanitize_log_value(filename),
                     )
-                return _box_error(
-                    "file_too_large",
-                    "The uploaded file exceeds the allowed size.",
-                    status=413,
-                    context={"rollback_failed_ids": failed_rollbacks} if failed_rollbacks else None,
-                )
-            except Exception as error:
-                lifecycle_logger.exception(
-                    "box_upload_failed reason=internal_error filename=%s",
-                    sanitize_log_value(filename),
-                )
-                if temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
-                if upload_path.exists():
-                    upload_path.unlink(missing_ok=True)
-                    prune_empty_upload_dirs(upload_path.parent)
-                _close_stream_safely(
-                    getattr(upload, "stream", None),
-                    f"box-upload-exception file_id={file_id}",
-                )
-                failed_rollbacks = rollback_successful_uploads(successful_uploads)
-                if failed_rollbacks:
-                    lifecycle_logger.error(
-                        "rollback_incomplete file_ids=%s",
-                        [sanitize_log_value(value) for value in failed_rollbacks],
+                    if temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                        prune_empty_upload_dirs(upload_path.parent)
+                    failed_rollbacks = rollback_successful_uploads(successful_uploads)
+                    if failed_rollbacks:
+                        lifecycle_logger.error(
+                            "rollback_incomplete file_ids=%s",
+                            [sanitize_log_value(value) for value in failed_rollbacks],
+                        )
+                    return _box_error(
+                        "internal_error",
+                        "Failed to store uploaded file.",
+                        status=500,
+                        context={"rollback_failed_ids": failed_rollbacks}
+                        if failed_rollbacks
+                        else None,
                     )
-                return _box_error(
-                    "internal_error",
-                    "Failed to store uploaded file.",
-                    status=500,
-                    context={"rollback_failed_ids": failed_rollbacks} if failed_rollbacks else None,
-                )
 
+            content_type = content_type or upload.content_type
+
+            try:
+                with quota_lock:
+                    enforce_storage_quota_for_size(size)
+                    file_id = register_file(
+                        original_name=filename,
+                        stored_name=stored_name,
+                        content_type=content_type,
+                        size=size,
+                        retention_hours=retention_hours,
+                        file_id=file_id,
+                    )
+            except StorageQuotaExceededError as quota_error:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                lifecycle_logger.warning(
+                    "box_upload_quota_exceeded file_id=%s filename=%s usage=%d limit=%d",
+                    file_id,
+                    sanitize_log_value(filename),
+                    quota_error.current_usage,
+                    quota_error.quota_limit,
+                )
+                failed_rollbacks = rollback_successful_uploads(successful_uploads)
+                if failed_rollbacks:
+                    lifecycle_logger.error(
+                        "rollback_incomplete file_ids=%s",
+                        [sanitize_log_value(value) for value in failed_rollbacks],
+                    )
+                return _box_error(
+                    "storage_quota_exceeded",
+                    "Storage quota exceeded.",
+                    status=507,
+                    context={"rollback_failed_ids": failed_rollbacks}
+                    if failed_rollbacks
+                    else None,
+                )
+            successful_uploads.append((file_id, stored_name))
             record = get_file(file_id)
             if not record:
                 if upload_path.exists():
@@ -3172,6 +3169,14 @@ def s3_multipart_upload(bucket: str):
             substitution = secure_filename(upload.filename) or upload.filename
             key = key.replace("${filename}", substitution)
 
+        if ".." in key or key.startswith("/"):
+            return _s3_error_response(
+                "InvalidArgument",
+                "Key contains invalid path components",
+                bucket=bucket,
+                status_code=400,
+            )
+
         original_name = (
             request.form.get("x-amz-meta-original-filename")
             or request.form.get("X-Amz-Meta-Original-Filename")
@@ -3245,11 +3250,13 @@ def s3_multipart_upload(bucket: str):
             except (OSError, IOError):
                 pass
 
-        try:
+        size = 0
+        content_type: Optional[str] = None
+        with upload_stream_handler(upload) as managed_upload:
             try:
                 with temp_path.open("wb") as destination:
                     while True:
-                        chunk = upload.stream.read(1024 * 1024)
+                        chunk = managed_upload.stream.read(1024 * 1024)
                         if not chunk:
                             break
                         destination.write(chunk)
@@ -3257,47 +3264,45 @@ def s3_multipart_upload(bucket: str):
                         written += len(chunk)
                         if max_bytes and written > max_bytes:
                             raise ValueError("file too large")
-            finally:
-                _close_stream_safely(
-                    getattr(upload, "stream", None),
-                    f"s3-post file_id={file_id}",
+
+                temp_path.replace(upload_path)
+                size = written if written else upload_path.stat().st_size
+                if max_bytes and size > max_bytes:
+                    raise ValueError("file too large")
+                content_type = managed_upload.content_type
+            except ValueError:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                return _s3_error_response(
+                    "EntityTooLarge",
+                    "The uploaded file exceeds the allowed size.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=413,
+                )
+            except Exception as error:
+                lifecycle_logger.exception(
+                    "s3_upload_failed reason=write_error bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                return _s3_error_response(
+                    "InternalError",
+                    "Failed to store uploaded file.",
+                    bucket=bucket,
+                    key=key,
+                    status_code=500,
                 )
 
-            temp_path.replace(upload_path)
-            size = written if written else upload_path.stat().st_size
-            if max_bytes and size > max_bytes:
-                raise ValueError("file too large")
-        except ValueError:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            return _s3_error_response(
-                "EntityTooLarge",
-                "The uploaded file exceeds the allowed size.",
-                bucket=bucket,
-                key=key,
-                status_code=413,
-            )
-        except Exception as error:
-            lifecycle_logger.exception(
-                "s3_upload_failed reason=write_error bucket=%s key=%s",
-                bucket,
-                sanitize_log_value(key),
-            )
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-                prune_empty_upload_dirs(upload_path.parent)
-            return _s3_error_response(
-                "InternalError",
-                "Failed to store uploaded file.",
-                bucket=bucket,
-                key=key,
-                status_code=500,
-            )
+        content_type = content_type or upload.content_type
 
         try:
             retention_hours = resolve_retention(
@@ -3327,7 +3332,7 @@ def s3_multipart_upload(bucket: str):
                 file_id = register_file(
                     original_name=filename,
                     stored_name=stored_name,
-                    content_type=upload.content_type,
+                    content_type=content_type,
                     size=size,
                     retention_hours=retention_hours,
                     file_id=file_id,
