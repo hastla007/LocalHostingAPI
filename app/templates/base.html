@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "Local Hosting API" }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <header>
+      <h1>
+        <a href="{{ url_for('hosting') }}" class="logo">
+          <span class="logo-local">LocalHosting</span>
+          <span class="logo-api">API</span>
+        </a>
+      </h1>
+      <nav>
+        <a href="{{ url_for('hosting') }}" class="{{ 'active' if request.endpoint == 'hosting' else '' }}">Hosting</a>
+        <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint in ('logs_page', 'logs_data') else '' }}">Logs</a>
+        <a href="{{ url_for('upload_file_page') }}" class="{{ 'active' if request.endpoint == 'upload_file_page' else '' }}">Upload File</a>
+        <a href="{{ url_for('api_docs') }}" class="{{ 'active' if request.endpoint == 'api_docs' else '' }}">API Docs</a>
+        <a href="{{ url_for('api_keys') }}" class="{{ 'active' if request.endpoint == 'api_keys' else '' }}">API Keys</a>
+        <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' else '' }}">Settings</a>
+        {% if ui_auth_enabled %}
+          {% if ui_authenticated %}
+            <form method="post" action="{{ url_for('logout') }}" class="logout-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+              <button type="submit" class="link-button">Log out</button>
+            </form>
+          {% else %}
+            <a href="{{ url_for('login') }}" class="{{ 'active' if request.endpoint == 'login' else '' }}">Log in</a>
+          {% endif %}
+        {% endif %}
+      </nav>
+    </header>
+    <main>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <ul class="flash-messages">
+            {% for category, message in messages %}
+              <li class="flash {{ category }}">{{ message }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+    <footer>
+      <p>&copy; {{ current_year or now().year }} Local Hosting API</p>
+    </footer>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

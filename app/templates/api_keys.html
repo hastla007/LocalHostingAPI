@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card">
+    <h2>API Authentication</h2>
+    <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_api_auth" />
+
+      <label for="api_auth_enabled" class="checkbox-label">
+        <input
+          type="checkbox"
+          id="api_auth_enabled"
+          name="api_auth_enabled"
+          {% if config.api_auth_enabled %}checked{% endif %}
+        />
+        Require API keys for upload endpoints
+      </label>
+
+      <p class="form-help">
+        When enabled, API clients must provide a valid key using the <code>X-API-Key</code> header (or
+        <code>Authorization: Bearer</code>) when calling upload and download endpoints. Keys are managed below.
+      </p>
+
+      {% if config.api_auth_enabled and not api_ui_key %}
+        <p class="form-help warning">
+          Dashboard uploads currently do not have an assigned API key. Set a key as the dashboard default below to continue
+          uploading from the browser.
+        </p>
+      {% elif config.api_auth_enabled and api_ui_key and not api_ui_key.has_plaintext %}
+        <p class="form-help warning">
+          The selected dashboard API key cannot be retrieved securely. Generate a new key or promote a recently created key to
+          restore browser uploads.
+        </p>
+      {% endif %}
+
+      <button type="submit" class="button primary">Update API Authentication</button>
+    </form>
+
+    <div class="api-key-management">
+      <h3>API Keys</h3>
+      <form method="post" class="generate-key-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="action" value="generate_api_key" />
+        <label for="api_key_label">Label (optional)</label>
+        <input
+          type="text"
+          id="api_key_label"
+          name="api_key_label"
+          placeholder="Describe this key (e.g., Build Server)"
+        />
+        <button type="submit" class="button primary">Generate API Key</button>
+      </form>
+
+      {% if encryption_warning %}
+        <div class="alert warning">
+          Existing API keys cannot be decrypted with the current secret key. Generate new keys to restore browser access to
+          plaintext values.
+        </div>
+      {% endif %}
+
+      {% if pending_keys %}
+        <div class="alert success">
+          Copy the newly generated API key{% if pending_keys|length > 1 %}s{% endif %} below. Keys remain visible for a short time
+          in this session or until you confirm they have been stored safely.
+        </div>
+        <ul class="pending-key-list">
+          {% for pending in pending_keys %}
+            <li class="pending-key-item">
+              <div class="api-key-value new-key-display">
+                <input type="text" id="new-api-key-{{ loop.index }}" value="{{ pending.value }}" readonly />
+                <button
+                  type="button"
+                  class="button primary"
+                  onclick="copyApiKeyValue('new-api-key-{{ loop.index }}')"
+                >
+                  📋 Copy
+                </button>
+                <form method="post" class="inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="acknowledge_api_key" />
+                  <input type="hidden" name="pending_key_id" value="{{ pending.id }}" />
+                  <button type="submit" class="button secondary">I have stored this key</button>
+                </form>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+
+      {% if config.api_keys %}
+        <ul class="api-key-list">
+          {% for key in config.api_keys %}
+            <li class="api-key-item">
+              <div class="api-key-header">
+                <div>
+                  <span class="api-key-label">{{ key.label or 'Key ' ~ loop.index }}</span>
+                  {% if api_ui_key and api_ui_key.id == key.id %}
+                    <span class="badge">Dashboard Default</span>
+                  {% endif %}
+                </div>
+                <span class="api-key-created">Created {{ key.created_at|human_datetime }}</span>
+              </div>
+              <div class="api-key-body">
+                <div class="api-key-value">
+                  <input type="text" value="••••••••••••••••" readonly disabled />
+                  <small class="api-key-hint">Key is hashed and cannot be displayed. Copy it when generated.</small>
+                </div>
+                <div class="api-key-actions">
+                  <form method="post" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="hidden" name="action" value="set_primary_api_key" />
+                    <input type="hidden" name="api_key_id" value="{{ key.id }}" />
+                    <button type="submit" class="button secondary" {% if api_ui_key and api_ui_key.id == key.id %}disabled{% endif %}>
+                      Use for Dashboard
+                    </button>
+                  </form>
+                  <form method="post" class="inline-form" onsubmit="return confirm('Delete this API key? This action cannot be undone.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                    <input type="hidden" name="action" value="delete_api_key" />
+                    <input type="hidden" name="api_key_id" value="{{ key.id }}" />
+                    <button type="submit" class="button danger">Delete</button>
+                  </form>
+                </div>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="form-help">No API keys have been created yet.</p>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    function copyApiKeyValue(elementId) {
+      const input = document.getElementById(elementId);
+      if (!input) {
+        alert('Key not found.');
+        return;
+      }
+      input.focus();
+      input.select();
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(input.value).then(function () {
+            alert('API key copied to clipboard!');
+          }, function (err) {
+            alert('Failed to copy: ' + err);
+          });
+        } else {
+          const successful = document.execCommand('copy');
+          alert(successful ? 'API key copied to clipboard!' : 'Copy command not supported.');
+        }
+      } catch (err) {
+        alert('Failed to copy: ' + err);
+      }
+      window.getSelection().removeAllRanges();
+    }
+    window.copyApiKeyValue = copyApiKeyValue;
+  </script>
+{% endblock %}
