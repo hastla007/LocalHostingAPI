@@ -76,12 +76,6 @@
                 >
                   📋 Copy
                 </button>
-                <form method="post" class="inline-form">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-                  <input type="hidden" name="action" value="acknowledge_api_key" />
-                  <input type="hidden" name="pending_key_id" value="{{ pending.id }}" />
-                  <button type="submit" class="button secondary">I have stored this key</button>
-                </form>
               </div>
             </li>
           {% endfor %}
