@@ -1,0 +1,48 @@
+# ---- Version control ----
+.git
+.gitignore
+
+# ---- Python caches ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+*.egg-info/
+.eggs/
+
+# ---- Virtual environments ----
+env/
+venv/
+.venv/
+ENV/
+Pipfile.lock
+poetry.lock
+
+# ---- Local data & runtime outputs ----
+uploads/
+data/
+logs/
+*.log
+
+# ---- Build / OS clutter ----
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+
+# ---- Docker artifacts ----
+Dockerfile
+docker-compose.yml
+
+# ---- IDE / Editor settings ----
+.vscode/
+.idea/
+*.code-workspace
+
+# ---- Tests & docs (optional) ----
+tests/
+docs/
+README.md
+LICENSE
