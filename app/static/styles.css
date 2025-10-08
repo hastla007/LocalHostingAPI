@@ -628,6 +628,12 @@ main {
   max-width: 420px;
 }
 
+.auth-grid .button {
+  justify-self: start;
+  width: auto;
+  min-width: 0;
+}
+
 .checkbox-label {
   display: flex;
   align-items: center;
@@ -711,7 +717,7 @@ main {
 }
 
 .drop-zone.dragover {
-  border-color: #2563eb;
+  border-color: #0f172a;
   background: #eff6ff;
 }
 
