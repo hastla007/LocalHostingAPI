@@ -1,0 +1,36 @@
+# --- VCS / meta ---
+.git
+.gitignore
+
+# --- Python caches / packaging artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Local runtime data (persist via volumes instead) ---
+app/uploads/
+app/data/
+app/logs/
+*.log
+
+# --- Tests & examples (not needed in image) ---
+tests/
+
+# --- OS/editor clutter ---
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+.vscode/
+.idea/
+*.code-workspace
