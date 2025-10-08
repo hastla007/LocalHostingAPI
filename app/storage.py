@@ -492,8 +492,37 @@ def register_file(
                 )
             break
         except sqlite3.IntegrityError as error:
-            if "direct_path" not in str(error) or attempt == max_attempts - 1:
+            if "direct_path" not in str(error):
                 raise
+            if attempt == max_attempts - 1:
+                fallback_base = secure_filename(original_name) or "file"
+                fallback_candidate = f"{file_id}-{fallback_base[:50]}"
+                with get_db() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        """
+                        INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            file_id,
+                            original_name,
+                            stored_name,
+                            content_type,
+                            size,
+                            uploaded_at,
+                            expires_at,
+                            fallback_candidate,
+                        ),
+                    )
+                direct_path = fallback_candidate
+                logger.warning(
+                    "direct_path_collision_max_attempts file_id=%s original=%s fallback=%s",
+                    file_id,
+                    original_name,
+                    fallback_candidate,
+                )
+                break
             time.sleep(0.05 * (attempt + 1))
         except Exception:
             raise
@@ -636,6 +665,33 @@ def cleanup_orphaned_files() -> int:
 
     if removed:
         logger.info("orphan_cleanup_completed removed=%d", removed)
+    return removed
+
+
+def cleanup_temp_files() -> int:
+    """Remove lingering temporary upload files."""
+
+    ensure_directories()
+    removed = 0
+    cutoff = time.time() - 3600
+
+    for shard_dir in UPLOADS_DIR.rglob("*"):
+        if not shard_dir.is_dir():
+            continue
+
+        for temp_file in shard_dir.glob("*.tmp"):
+            try:
+                if temp_file.stat().st_mtime < cutoff:
+                    temp_file.unlink()
+                    removed += 1
+                    logger.info("temp_file_removed path=%s", temp_file)
+            except OSError as error:
+                logger.warning(
+                    "temp_cleanup_failed path=%s error=%s",
+                    temp_file,
+                    error,
+                )
+
     return removed
 
 

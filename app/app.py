@@ -13,14 +13,14 @@ import uuid
 from copy import deepcopy
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
 from secrets import compare_digest
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
-from urllib.parse import urlencode as _compat_urlencode, urlparse
+from urllib.parse import urlencode as _compat_urlencode, urlparse, unquote
 
 from markupsafe import escape
 
@@ -117,7 +117,7 @@ from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
 try:
-    from flask_wtf.csrf import CSRFProtect, CSRFError
+    from flask_wtf.csrf import CSRFProtect, CSRFError, validate_csrf
     HAS_FLASK_WTF = True
 except ModuleNotFoundError:  # pragma: no cover - fallback for test environments
     HAS_FLASK_WTF = False
@@ -138,6 +138,10 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for test environments
         def exempt(self, view: Callable) -> Callable:
             return view
 
+    def validate_csrf(token: str) -> None:  # type: ignore[override]
+        if not token:
+            raise CSRFError("Missing CSRF token")
+
 from .storage import (
     DATA_DIR,
     LOGS_DIR,
@@ -145,6 +149,7 @@ from .storage import (
     RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
     cleanup_orphaned_files,
+    cleanup_temp_files,
     delete_file,
     ensure_directories,
     get_db,
@@ -159,9 +164,11 @@ from .storage import (
     prune_empty_upload_dirs,
     register_file,
     save_config,
+    DEFAULT_MAX_CONCURRENT_UPLOADS,
 )
 
 _CONFIG_CACHE: Dict[str, Any] = load_config()
+_config_lock = threading.RLock()
 
 from threading import Semaphore
 
@@ -215,7 +222,8 @@ def _load_secret_key() -> str:
 
 _SECRET_KEY_VALUE: Optional[str] = None
 _api_key_serializer: Optional[URLSafeSerializer] = None
-_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+MAX_FILENAME_LENGTH = int(os.environ.get("LOCALHOSTING_MAX_FILENAME_LENGTH", "255"))
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f\n\r]")
 
 
 def sanitize_log_value(value: Any) -> Any:
@@ -226,6 +234,24 @@ def sanitize_log_value(value: Any) -> Any:
             lambda match: f"\\x{ord(match.group()):02x}", value
         )
     return value
+
+
+def validate_filename(filename: str) -> tuple[bool, Optional[str]]:
+    """Validate filenames for length and disallowed characters."""
+
+    if not filename:
+        return False, "Filename cannot be empty"
+
+    if len(filename) > MAX_FILENAME_LENGTH:
+        return (
+            False,
+            f"Filename exceeds maximum length of {MAX_FILENAME_LENGTH} characters",
+        )
+
+    if "\x00" in filename:
+        return False, "Filename contains invalid characters"
+
+    return True, None
 
 
 def validate_upload_mimetype(filename: str, declared_type: Optional[str]) -> bool:
@@ -261,15 +287,19 @@ class AmbiguousAPIKeyError(Exception):
     """Raised when multiple API keys are provided in a single request."""
 
 
-def rollback_successful_uploads(file_ids: Iterable[str]) -> None:
+def rollback_successful_uploads(file_ids: Iterable[str]) -> List[str]:
+    failed: List[str] = []
     for uploaded_id in file_ids:
         try:
-            delete_file(uploaded_id)
+            if not delete_file(uploaded_id):
+                failed.append(uploaded_id)
         except Exception:
             lifecycle_logger.warning(
                 "rollback_delete_failed file_id=%s",
                 sanitize_log_value(uploaded_id),
             )
+            failed.append(uploaded_id)
+    return failed
 
 
 def _parse_origin(value: Optional[str]) -> Optional[str]:
@@ -289,6 +319,31 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
     if getattr(g, "api_key_authenticated", False):
         return None
 
+    def _reject(message: str, status_code: int = 403) -> Response:
+        payload = {"error": message}
+        if response_format == "box":
+            return _box_error("access_denied", message, status=status_code)
+        if response_format == "s3":
+            return _s3_error_response("AccessDenied", message, status_code=status_code)
+        return make_response(jsonify(payload), status_code)
+
+    if ui_auth_enabled() and ui_user_authenticated():
+        if HAS_FLASK_WTF:
+            token = (
+                request.form.get("csrf_token")
+                or request.headers.get("X-CSRFToken")
+                or request.headers.get("X-CSRF-Token")
+            )
+            try:
+                validate_csrf(token)
+            except Exception as error:
+                lifecycle_logger.warning(
+                    "csrf_token_invalid path=%s error=%s",
+                    sanitize_log_value(request.path),
+                    sanitize_log_value(str(error)),
+                )
+                return _reject("Invalid or missing CSRF token")
+
     allowed_origin = _parse_origin(request.host_url)
     origin = _parse_origin(request.headers.get("Origin"))
     referer = _parse_origin(request.headers.get("Referer"))
@@ -300,14 +355,21 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
                 sanitize_log_value(candidate or "unknown"),
                 sanitize_log_value(request.path),
             )
-            message = {"error": "Cross-site requests are not allowed"}
-            if response_format == "box":
-                return _box_error("access_denied", message["error"], status=403)
-            if response_format == "s3":
-                return _s3_error_response(
-                    "AccessDenied", message["error"], status_code=403
-                )
-            return jsonify(message), 403
+            return _reject("Cross-site requests are not allowed")
+
+    if (
+        ui_auth_enabled()
+        and ui_user_authenticated()
+        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and origin is None
+        and referer is None
+    ):
+        lifecycle_logger.warning(
+            "csrf_blocked_missing_origin path=%s ip=%s",
+            sanitize_log_value(request.path),
+            request.remote_addr or "unknown",
+        )
+        return _reject("Cross-site requests must include an Origin or Referer header")
 
     return None
 
@@ -553,12 +615,33 @@ def _coerce_positive_int(value: Any, fallback: int) -> int:
     return max(1, parsed)
 
 
+def _memory_based_concurrency_cap(default: int) -> int:
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        phys_pages = os.sysconf("SC_PHYS_PAGES")
+        approx = int((page_size * phys_pages) / (100 * 1024 * 1024))
+        return max(1, approx)
+    except (AttributeError, OSError, ValueError):
+        return max(1, default)
+
+
 def _apply_concurrency_limit(config: Dict[str, Any]) -> None:
     global upload_semaphore, max_concurrent_uploads_setting
 
-    new_limit = _coerce_positive_int(
-        config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or 10
+    fallback_default = max(1, int(DEFAULT_MAX_CONCURRENT_UPLOADS))
+    requested_limit = _coerce_positive_int(
+        config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or fallback_default
     )
+    hard_cap = min(fallback_default, _memory_based_concurrency_cap(fallback_default))
+    new_limit = min(requested_limit, hard_cap)
+
+    if new_limit < requested_limit:
+        logging.getLogger("localhosting.performance").warning(
+            "concurrency_limit_reduced requested=%d applied=%d cap=%d",
+            requested_limit,
+            new_limit,
+            hard_cap,
+        )
 
     if new_limit != max_concurrent_uploads_setting:
         upload_semaphore = Semaphore(new_limit)
@@ -607,18 +690,17 @@ def _apply_runtime_settings(config: Dict[str, Any]) -> None:
 
 def get_config(refresh: bool = False) -> Dict[str, Any]:
     global _CONFIG_CACHE
-    if refresh or _CONFIG_CACHE is None:
-        _CONFIG_CACHE = load_config()
+    with _config_lock:
+        if refresh or _CONFIG_CACHE is None:
+            _CONFIG_CACHE = load_config()
 
-    if has_request_context():
-        cached = getattr(g, "_app_config", None)
-        if cached is None or refresh:
-            g._app_config = _CONFIG_CACHE
+        if has_request_context():
+            cached = getattr(g, "_app_config", None)
+            if cached is None or refresh:
+                g._app_config = deepcopy(_CONFIG_CACHE)
             config = g._app_config
         else:
-            config = cached
-    else:
-        config = _CONFIG_CACHE
+            config = deepcopy(_CONFIG_CACHE)
 
     _apply_runtime_settings(config)
     return config
@@ -960,6 +1042,10 @@ app.config["MAX_CONTENT_LENGTH"] = int(
 )
 app.config["MAX_UPLOAD_SIZE_MB"] = _CONFIG_CACHE.get("max_upload_size_mb", 500)
 app.config["SECRET_KEY"] = get_secret_key_value()
+app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=1)
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 
@@ -1129,6 +1215,14 @@ if BackgroundScheduler is not None:
         name="Clean up orphaned files",
         replace_existing=True,
     )
+    scheduler.add_job(
+        func=cleanup_temp_files,
+        trigger="interval",
+        hours=1,
+        id="cleanup_temp_files",
+        name="Clean up temporary files",
+        replace_existing=True,
+    )
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
 else:  # pragma: no cover - exercised in environments without APScheduler
@@ -1139,6 +1233,10 @@ else:  # pragma: no cover - exercised in environments without APScheduler
         ),
         _FallbackCleanupScheduler(
             cleanup_orphaned_files,
+            minutes=60,
+        ),
+        _FallbackCleanupScheduler(
+            cleanup_temp_files,
             minutes=60,
         ),
     ]
@@ -1329,30 +1427,66 @@ def index():
 
 @app.route("/health")
 def health_check():
+    checks: Dict[str, Any] = {}
+    healthy = True
+
     try:
         with get_db() as conn:
             conn.execute("SELECT 1").fetchone()
-        db_healthy = True
-    except Exception:
-        db_healthy = False
+            conn.execute("SELECT COUNT(*) FROM files").fetchone()
+        checks["database"] = "ok"
+    except Exception as error:
+        checks["database"] = f"error: {str(error)[:100]}"
+        healthy = False
 
     try:
+        ensure_directories()
         usage = shutil.disk_usage(UPLOADS_DIR)
         disk_free_gb = usage.free / (1024 ** 3)
-    except (FileNotFoundError, OSError):
-        disk_free_gb = 0
-        db_healthy = False
-    status = "healthy" if db_healthy and disk_free_gb > 1 else "unhealthy"
-    code = 200 if status == "healthy" else 503
+        checks["disk_space_gb"] = round(disk_free_gb, 2)
+        if disk_free_gb < 1:
+            checks["disk_space_status"] = "critical"
+            healthy = False
+        elif disk_free_gb < 5:
+            checks["disk_space_status"] = "warning"
+        else:
+            checks["disk_space_status"] = "ok"
+    except Exception as error:
+        checks["disk_space_gb"] = 0
+        checks["disk_space_status"] = f"error: {str(error)[:100]}"
+        healthy = False
+
+    try:
+        ensure_directories()
+        probe_file = UPLOADS_DIR / f".health_check_{uuid.uuid4().hex}"
+        probe_file.write_text("health_check", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        checks["uploads_writable"] = "ok"
+    except Exception as error:
+        checks["uploads_writable"] = f"error: {str(error)[:100]}"
+        healthy = False
+
+    try:
+        if BackgroundScheduler is not None and scheduler is not None:
+            job = scheduler.get_job("cleanup_expired_files")
+            if job and job.next_run_time:
+                checks["cleanup"] = "scheduled"
+                checks["cleanup_next_run"] = job.next_run_time.isoformat()
+            else:
+                checks["cleanup"] = "not_scheduled"
+        else:
+            checks["cleanup"] = "fallback_scheduler"
+    except Exception as error:
+        checks["cleanup"] = f"error: {str(error)[:100]}"
+
+    status = "healthy" if healthy else "unhealthy"
+    code = 200 if healthy else 503
 
     return jsonify(
         {
             "status": status,
             "timestamp": time.time(),
-            "checks": {
-                "database": "ok" if db_healthy else "error",
-                "disk_space_gb": round(disk_free_gb, 2),
-            },
+            "checks": checks,
             "version": "1.0.0",
         }
     ), code
@@ -1845,17 +1979,32 @@ def fileupload():
             return jsonify({"error": "File too large"}), 413
 
         uploads = request.files.getlist("file")
-        size_failures: List[Dict[str, str]] = []
+        preflight_failures: List[Dict[str, str]] = []
         valid_uploads = []
         for upload in uploads:
             if not isinstance(upload, FileStorage) or not upload or upload.filename == "":
                 continue
             filename = secure_filename(upload.filename)
             if not filename:
-                app.logger.warning(
-                    "upload_failed reason=invalid_filename original=%s", upload.filename
+                preflight_failures.append(
+                    {
+                        "filename": upload.filename or "",
+                        "reason": "invalid_filename",
+                        "detail": "Filename could not be sanitized",
+                    }
                 )
-                return jsonify({"error": "Invalid filename"}), 400
+                continue
+
+            is_valid_name, name_error = validate_filename(filename)
+            if not is_valid_name:
+                preflight_failures.append(
+                    {
+                        "filename": filename,
+                        "reason": "invalid_filename",
+                        "detail": name_error or "Invalid filename",
+                    }
+                )
+                continue
             if not validate_upload_mimetype(filename, upload.content_type):
                 lifecycle_logger.warning(
                     "upload_suspicious_mimetype filename=%s declared=%s",
@@ -1863,7 +2012,7 @@ def fileupload():
                     upload.content_type,
                 )
             if max_bytes and upload.content_length and upload.content_length > max_bytes:
-                size_failures.append(
+                preflight_failures.append(
                     {
                         "filename": filename,
                         "reason": "too_large",
@@ -1873,10 +2022,18 @@ def fileupload():
             valid_uploads.append((upload, filename))
 
         if not valid_uploads:
-            if size_failures:
-                return jsonify(
-                    {"message": "Failed to upload files.", "errors": size_failures}
-                ), 413
+            if preflight_failures:
+                status_code = (
+                    413
+                    if any(entry.get("reason") == "too_large" for entry in preflight_failures)
+                    else 400
+                )
+                return (
+                    jsonify(
+                        {"message": "Failed to upload files.", "errors": preflight_failures}
+                    ),
+                    status_code,
+                )
             app.logger.warning("upload_failed reason=no_file_selected")
             return jsonify({"error": "No file selected"}), 400
 
@@ -1905,7 +2062,7 @@ def fileupload():
             return jsonify(error.to_payload()), 400
 
         results = []
-        failures: List[Dict[str, str]] = list(size_failures)
+        failures: List[Dict[str, str]] = []
         successful_file_ids: List[str] = []
         for upload, filename in valid_uploads:
             upload_path = None
@@ -2030,12 +2187,20 @@ def fileupload():
             successful_file_ids.append(file_id)
 
         if failures:
-            rollback_successful_uploads(successful_file_ids)
+            failed_rollbacks = rollback_successful_uploads(successful_file_ids)
+            if failed_rollbacks:
+                lifecycle_logger.error(
+                    "rollback_incomplete file_ids=%s",
+                    [sanitize_log_value(value) for value in failed_rollbacks],
+                )
             status = 413 if any(entry.get("reason") == "too_large" for entry in failures) else 400
-            return (
-                jsonify({"message": "Failed to upload files.", "errors": failures}),
-                status,
-            )
+            payload: Dict[str, Any] = {
+                "message": "Failed to upload files.",
+                "errors": failures,
+            }
+            if failed_rollbacks:
+                payload["rollback_failed_ids"] = failed_rollbacks
+            return jsonify(payload), status
 
         if not results:
             return jsonify({"message": "Failed to upload files.", "errors": []}), 400
@@ -2228,6 +2393,15 @@ def box_upload_files():
                     or f"upload-{uuid.uuid4().hex}"
                 )
 
+            is_valid_name, name_error = validate_filename(filename)
+            if not is_valid_name:
+                lifecycle_logger.warning(
+                    "box_upload_invalid_filename filename=%s error=%s",
+                    sanitize_log_value(filename),
+                    sanitize_log_value(name_error or "invalid"),
+                )
+                continue
+
             file_id = str(uuid.uuid4())
             stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
             upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
@@ -2292,11 +2466,17 @@ def box_upload_files():
                         upload.stream.close()
                     except OSError:
                         pass
-                rollback_successful_uploads(successful_file_ids)
+                failed_rollbacks = rollback_successful_uploads(successful_file_ids)
+                if failed_rollbacks:
+                    lifecycle_logger.error(
+                        "rollback_incomplete file_ids=%s",
+                        [sanitize_log_value(value) for value in failed_rollbacks],
+                    )
                 return _box_error(
                     "file_too_large",
                     "The uploaded file exceeds the allowed size.",
                     status=413,
+                    context={"rollback_failed_ids": failed_rollbacks} if failed_rollbacks else None,
                 )
             except Exception as error:
                 lifecycle_logger.exception(
@@ -2313,11 +2493,17 @@ def box_upload_files():
                         upload.stream.close()
                     except OSError:
                         pass
-                rollback_successful_uploads(successful_file_ids)
+                failed_rollbacks = rollback_successful_uploads(successful_file_ids)
+                if failed_rollbacks:
+                    lifecycle_logger.error(
+                        "rollback_incomplete file_ids=%s",
+                        [sanitize_log_value(value) for value in failed_rollbacks],
+                    )
                 return _box_error(
                     "internal_error",
                     "Failed to store uploaded file.",
                     status=500,
+                    context={"rollback_failed_ids": failed_rollbacks} if failed_rollbacks else None,
                 )
 
             record = get_file(file_id)
@@ -2330,11 +2516,17 @@ def box_upload_files():
                     "box_upload_failed reason=registration_missing file_id=%s",
                     file_id,
                 )
-                rollback_successful_uploads(successful_file_ids)
+                failed_rollbacks = rollback_successful_uploads(successful_file_ids)
+                if failed_rollbacks:
+                    lifecycle_logger.error(
+                        "rollback_incomplete file_ids=%s",
+                        [sanitize_log_value(value) for value in failed_rollbacks],
+                    )
                 return _box_error(
                     "internal_error",
                     f"Failed to register file {original_name}",
                     status=500,
+                    context={"rollback_failed_ids": failed_rollbacks} if failed_rollbacks else None,
                 )
 
             download_url = url_for("download", file_id=file_id, _external=True)
@@ -2485,7 +2677,21 @@ def serve_raw_file(direct_path: str):
     if not normalized:
         abort(404)
 
-    if ".." in normalized:
+    try:
+        decoded = unquote(normalized)
+    except Exception:
+        abort(400)
+
+    normalized = decoded.strip("/")
+    if not normalized:
+        abort(404)
+
+    if ".." in normalized or "\\" in normalized or normalized.startswith("/"):
+        lifecycle_logger.warning(
+            "path_traversal_attempt path=%s ip=%s",
+            sanitize_log_value(direct_path),
+            request.remote_addr or "unknown",
+        )
         abort(404)
 
     first_segment = normalized.split("/", 1)[0]
@@ -2514,6 +2720,19 @@ def serve_raw_file(direct_path: str):
             record["id"],
             sanitize_log_value(record["stored_name"]),
         )
+        abort(404)
+
+    try:
+        resolved_path = file_path.resolve()
+        uploads_root = UPLOADS_DIR.resolve()
+        if uploads_root not in resolved_path.parents and resolved_path != uploads_root:
+            lifecycle_logger.error(
+                "path_traversal_detected file_id=%s path=%s",
+                record["id"],
+                resolved_path,
+            )
+            abort(404)
+    except Exception:
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info(
@@ -2611,6 +2830,23 @@ def s3_multipart_upload(bucket: str):
             filename = (
                 secure_filename(upload.filename or "upload")
                 or f"upload-{uuid.uuid4().hex}"
+            )
+
+        is_valid_name, name_error = validate_filename(filename)
+        if not is_valid_name:
+            lifecycle_logger.warning(
+                "s3_upload_invalid_filename bucket=%s key=%s filename=%s error=%s",
+                bucket,
+                sanitize_log_value(key),
+                sanitize_log_value(filename),
+                sanitize_log_value(name_error or "invalid"),
+            )
+            return _s3_error_response(
+                "InvalidArgument",
+                name_error or "Invalid filename",
+                bucket=bucket,
+                key=key,
+                status_code=400,
             )
 
         if not validate_upload_mimetype(filename, upload.content_type):
@@ -2822,6 +3058,22 @@ def s3_put_object(bucket: str, key: str):
         stored_filename = (
             secure_filename(os.path.basename(key)) or f"upload-{uuid.uuid4().hex}"
         )
+        is_valid_stored, stored_error = validate_filename(stored_filename)
+        if not is_valid_stored:
+            lifecycle_logger.warning(
+                "s3_upload_invalid_filename bucket=%s key=%s filename=%s error=%s",
+                bucket,
+                sanitize_log_value(key),
+                sanitize_log_value(stored_filename),
+                sanitize_log_value(stored_error or "invalid"),
+            )
+            return _s3_error_response(
+                "InvalidArgument",
+                stored_error or "Invalid filename",
+                bucket=bucket,
+                key=key,
+                status_code=400,
+            )
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
         upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
@@ -2911,6 +3163,22 @@ def s3_put_object(bucket: str, key: str):
             or stored_filename
         )
         filename = secure_filename(original_name) or stored_filename
+        is_valid_name, name_error = validate_filename(filename)
+        if not is_valid_name:
+            lifecycle_logger.warning(
+                "s3_upload_invalid_filename bucket=%s key=%s filename=%s error=%s",
+                bucket,
+                sanitize_log_value(key),
+                sanitize_log_value(filename),
+                sanitize_log_value(name_error or "invalid"),
+            )
+            return _s3_error_response(
+                "InvalidArgument",
+                name_error or "Invalid filename",
+                bucket=bucket,
+                key=key,
+                status_code=400,
+            )
         content_type = request.headers.get("Content-Type")
 
         if not validate_upload_mimetype(filename, content_type):
