@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="card logs-page">
+    <div class="logs-header">
+      <div>
+        <h2>Application Logs</h2>
+        <p class="logs-subtitle">Review container output and upload lifecycle events. Showing up to {{ log_payload.max_lines }} lines per source.</p>
+      </div>
+      <div class="logs-source-picker">
+        <label for="log-source" class="sr-only">Log Source</label>
+        <select id="log-source" name="source">
+          {% for source in sources %}
+            <option value="{{ source.id }}" {% if source.id == selected_source %}selected{% endif %}>{{ source.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="log-controls" role="group" aria-label="Log controls">
+      <button type="button" class="button secondary" id="log-refresh">
+        <span class="icon">⟳</span>
+        <span class="label">Manual Refresh</span>
+      </button>
+      <div class="auto-buttons" role="group" aria-label="Auto refresh intervals">
+        <button type="button" class="button ghost" data-auto-interval="5">Auto 5s</button>
+        <button type="button" class="button ghost" data-auto-interval="10">Auto 10s</button>
+        <button type="button" class="button ghost" data-auto-interval="30">Auto 30s</button>
+      </div>
+      <div class="auto-status" id="auto-status">Auto-refresh: OFF</div>
+    </div>
+
+    <dl class="log-meta">
+      <div>
+        <dt>Source</dt>
+        <dd id="log-source-label">{{ log_payload.label }}</dd>
+      </div>
+      <div>
+        <dt>Last updated</dt>
+        <dd id="log-updated">{{ log_payload.generated_at_iso }}</dd>
+      </div>
+      <div>
+        <dt>Last modified</dt>
+        <dd id="log-modified">{{ log_payload.last_modified_iso if log_payload.last_modified_iso else '—' }}</dd>
+      </div>
+      <div>
+        <dt>Size</dt>
+        <dd id="log-size">{% if log_payload.size_bytes is defined %}{{ log_payload.size_bytes | human_filesize }}{% else %}—{% endif %}</dd>
+      </div>
+      <div>
+        <dt>Lines loaded</dt>
+        <dd id="log-line-count">{{ log_payload.line_count }}</dd>
+      </div>
+    </dl>
+
+    <p class="log-description" id="log-description">{{ log_payload.description }}</p>
+
+    <div class="log-viewer" id="log-output" data-endpoint="{{ url_for('logs_data') }}">
+      {% if log_payload.available %}
+        <pre id="log-pre">{{ log_payload.text | e }}</pre>
+      {% else %}
+        <div class="log-empty" id="log-empty">{{ log_payload.message }}</div>
+      {% endif %}
+    </div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  {{ super() }}
+  <script>
+    (() => {
+      const endpoint = document.getElementById('log-output').dataset.endpoint;
+      const sourceSelect = document.getElementById('log-source');
+      const refreshButton = document.getElementById('log-refresh');
+      const autoButtons = document.querySelectorAll('[data-auto-interval]');
+      const autoStatus = document.getElementById('auto-status');
+      const logOutput = document.getElementById('log-output');
+      const sourceLabel = document.getElementById('log-source-label');
+      const updatedLabel = document.getElementById('log-updated');
+      const modifiedLabel = document.getElementById('log-modified');
+      const sizeLabel = document.getElementById('log-size');
+      const lineCountLabel = document.getElementById('log-line-count');
+      const descriptionLabel = document.getElementById('log-description');
+
+      let autoTimer = null;
+      let activeInterval = null;
+      let visibilityPaused = false;
+
+      const clearAuto = () => {
+        if (autoTimer) {
+          window.clearInterval(autoTimer);
+          autoTimer = null;
+        }
+        activeInterval = null;
+        visibilityPaused = false;
+        autoButtons.forEach((button) => button.classList.remove('active'));
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = 'Auto-refresh: OFF';
+        }
+      };
+
+      const setAuto = (intervalSeconds, button) => {
+        if (activeInterval === intervalSeconds) {
+          clearAuto();
+          return;
+        }
+        clearAuto();
+        activeInterval = intervalSeconds;
+        button.classList.add('active');
+        visibilityPaused = false;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = `Auto-refresh: every ${intervalSeconds}s`;
+        }
+        autoTimer = window.setInterval(fetchLogs, intervalSeconds * 1000);
+      };
+
+      const pauseAutoRefresh = () => {
+        if (!autoTimer || !activeInterval) {
+          return;
+        }
+        window.clearInterval(autoTimer);
+        autoTimer = null;
+        visibilityPaused = true;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = 'Auto-refresh: paused';
+        }
+      };
+
+      const resumeAutoRefresh = () => {
+        if (!activeInterval || autoTimer || !visibilityPaused) {
+          return;
+        }
+        autoTimer = window.setInterval(fetchLogs, activeInterval * 1000);
+        visibilityPaused = false;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = `Auto-refresh: every ${activeInterval}s`;
+        }
+        if (typeof fetchLogs === 'function') {
+          fetchLogs();
+        }
+      };
+
+      const renderPayload = (payload) => {
+        sourceLabel.textContent = payload.label;
+        updatedLabel.textContent = payload.generated_at_iso;
+        modifiedLabel.textContent = payload.last_modified_iso || '—';
+        sizeLabel.textContent = payload.size_human || '—';
+        lineCountLabel.textContent = payload.line_count;
+        if (descriptionLabel) {
+          descriptionLabel.textContent = payload.description || '';
+        }
+
+        const currentPre = logOutput.querySelector('#log-pre');
+        const currentEmpty = logOutput.querySelector('#log-empty');
+
+        if (payload.available) {
+          if (currentEmpty) {
+            currentEmpty.remove();
+          }
+          const pre = currentPre || document.createElement('pre');
+          pre.id = 'log-pre';
+          pre.textContent = payload.text;
+          if (!currentPre) {
+            logOutput.innerHTML = '';
+            logOutput.appendChild(pre);
+          }
+          logOutput.scrollTop = logOutput.scrollHeight;
+        } else {
+          if (currentPre) {
+            currentPre.remove();
+          }
+          const message = payload.message || 'Log file is not available yet.';
+          const placeholder = currentEmpty || document.createElement('div');
+          placeholder.id = 'log-empty';
+          placeholder.className = 'log-empty';
+          placeholder.textContent = message;
+          if (!currentEmpty) {
+            logOutput.innerHTML = '';
+            logOutput.appendChild(placeholder);
+          }
+        }
+      };
+
+      const fetchLogs = async () => {
+        const params = new URLSearchParams({ source: sourceSelect.value });
+        try {
+          const fetchOptions = {
+            headers: { Accept: 'application/json' },
+          };
+
+          if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+            fetchOptions.signal = AbortSignal.timeout(10000);
+          }
+
+          const response = await fetch(`${endpoint}?${params.toString()}`, fetchOptions);
+
+          if (!response.ok) {
+            let errorMsg = `HTTP ${response.status}`;
+            if (response.status === 401) {
+              errorMsg = 'Authentication required';
+            } else if (response.status === 403) {
+              errorMsg = 'Access denied';
+            } else if (response.status === 404) {
+              errorMsg = 'Log source not found';
+            } else if (response.status >= 500) {
+              errorMsg = 'Server error';
+            }
+            throw new Error(errorMsg);
+          }
+
+          const payload = await response.json();
+          renderPayload(payload);
+
+          if (autoStatus) {
+            autoStatus.classList.remove('error');
+            autoStatus.style.color = '';
+            autoStatus.style.fontWeight = '';
+            autoStatus.textContent = activeInterval
+              ? `Auto-refresh: every ${activeInterval}s`
+              : 'Auto-refresh: OFF';
+          }
+
+          const viewer = document.getElementById('log-output');
+          if (viewer) {
+            const placeholder = viewer.querySelector('.log-empty');
+            if (placeholder) {
+              placeholder.remove();
+            }
+          }
+        } catch (error) {
+          console.error('Log fetch error:', error);
+
+          let userMessage = 'Error loading logs';
+          if (error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+            userMessage = 'Request timed out - logs may be too large';
+          } else if (
+            error &&
+            typeof error.message === 'string' &&
+            (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))
+          ) {
+            userMessage = 'Network error - check connection';
+          } else if (error && typeof error.message === 'string' && error.message.trim()) {
+            userMessage = `Error: ${error.message}`;
+          }
+
+          clearAuto();
+
+          if (autoStatus) {
+            autoStatus.textContent = userMessage;
+            autoStatus.classList.add('error');
+            autoStatus.style.color = '#dc2626';
+            autoStatus.style.fontWeight = '600';
+          }
+
+          const viewer = document.getElementById('log-output');
+          if (viewer) {
+            viewer.innerHTML = `
+              <div class="log-empty" style="color: #fca5a5;">
+                ⚠️ ${userMessage}
+                <br><br>
+                <button type="button" class="button secondary" onclick="fetchLogs()">
+                  Retry
+                </button>
+              </div>
+            `;
+          }
+        }
+      };
+
+      refreshButton.addEventListener('click', fetchLogs);
+      sourceSelect.addEventListener('change', () => {
+        clearAuto();
+        fetchLogs();
+      });
+
+      autoButtons.forEach((button) => {
+        button.addEventListener('click', () => setAuto(Number(button.dataset.autoInterval), button));
+      });
+
+      window.fetchLogs = fetchLogs;
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          pauseAutoRefresh();
+        } else {
+          resumeAutoRefresh();
+        }
+      });
+    })();
+  </script>
+{% endblock %}
