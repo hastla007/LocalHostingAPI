@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="settings-row">
+    <section class="card retention-card">
+      <h2>Retention Settings</h2>
+      <form method="post" class="retention-system-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="action" value="update_retention" />
+
+        <div class="form-grid">
+          <label for="retention_min_hours">Minimum retention (hours)</label>
+          <input
+            type="number"
+            id="retention_min_hours"
+            name="retention_min_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_min_hours }}"
+            required
+          />
+
+          <label for="retention_max_hours">Maximum retention (hours)</label>
+          <input
+            type="number"
+            id="retention_max_hours"
+            name="retention_max_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_max_hours }}"
+            required
+          />
+
+          <label for="retention_hours">Default retention (hours)</label>
+          <input
+            type="number"
+            id="retention_hours"
+            name="retention_hours"
+            min="0"
+            step="0.1"
+            value="{{ config.retention_hours }}"
+            required
+          />
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="button primary">Save</button>
+        </div>
+      </form>
+      <p>
+        Each upload can now request its own retention period within the allowed range. Values outside of the configured bounds
+        will be rejected by the API and the dashboard uploader.
+      </p>
+    </section>
+    <section class="card storage-card">
+      <h2>Storage Management</h2>
+      <table class="settings-table">
+        <tbody>
+          <tr>
+            <th scope="row">Total storage used</th>
+            <td>{{ '%.3f'|format(storage_overview.total_gb) }} GB</td>
+          </tr>
+          <tr>
+            <th scope="row">Active files</th>
+            <td>{{ storage_overview.active_count }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Expired files pending cleanup</th>
+            <td>{{ storage_overview.expired_count }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Storage quota limit</th>
+            <td>
+              {% if storage_quota_limit is not none %}
+                {{ '%.2f'|format(storage_quota_limit) }} GB
+              {% else %}
+                <span class="text-muted">Not configured</span>
+              {% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="settings-action-row">
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="cleanup_expired_now" />
+          <button type="submit" class="button primary">Cleanup Expired Files Now</button>
+        </form>
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="action" value="cleanup_orphaned_now" />
+          <button type="submit" class="button secondary">Remove Orphaned Files</button>
+        </form>
+      </div>
+      <p class="form-help">
+        Values reflect the current environment configuration. Future releases will allow adjusting these storage controls directly
+        within the dashboard.
+      </p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Performance Settings</h2>
+    <form method="post" class="performance-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_performance" />
+      <table class="settings-table">
+        <tbody>
+          <tr>
+            <th scope="row">
+              <label for="max_upload_size_mb">Maximum upload size (MB)</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="max_upload_size_mb"
+                name="max_upload_size_mb"
+                min="1"
+                step="0.1"
+                value="{{ config.max_upload_size_mb }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="max_concurrent_uploads">Max concurrent uploads</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="max_concurrent_uploads"
+                name="max_concurrent_uploads"
+                min="1"
+                step="1"
+                value="{{ performance_settings.max_concurrent_uploads }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="cleanup_interval_minutes">Cleanup interval (minutes)</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="cleanup_interval_minutes"
+                name="cleanup_interval_minutes"
+                min="1"
+                step="1"
+                value="{{ performance_settings.cleanup_interval_minutes }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="upload_rate_limit_per_hour">Upload requests per hour</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="upload_rate_limit_per_hour"
+                name="upload_rate_limit_per_hour"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.upload_per_hour }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="login_rate_limit_per_minute">Login attempts per minute</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="login_rate_limit_per_minute"
+                name="login_rate_limit_per_minute"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.login_per_minute }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="download_rate_limit_per_minute">Download requests per minute</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="download_rate_limit_per_minute"
+                name="download_rate_limit_per_minute"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.download_per_minute }}"
+                required
+                class="performance-input"
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="form-actions">
+        <button type="submit" class="button primary">Save</button>
+      </div>
+    </form>
+    <p class="form-help">
+      These limits update immediately after saving. The scheduler interval applies to background cleanup jobs and may take up to
+      one full interval to reflect the new cadence.
+    </p>
+  </section>
+  <section class="card">
+    <h2>File Management Policies</h2>
+    <table class="settings-table">
+      <tbody>
+        <tr>
+          <th scope="row">Blocked file extensions</th>
+          <td>
+            {% if file_policy_settings.blocked_extensions %}
+              {{ file_policy_settings.blocked_extensions | join(', ') }}
+            {% else %}
+              <span class="text-muted">None configured</span>
+            {% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="form-help">
+      These policies are read from environment variables today. Capturing them here keeps operators informed until the values
+      can be edited directly through the dashboard.
+    </p>
+  </section>
+  <section class="card">
+    <h2>UI Authentication</h2>
+    <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_ui_auth" />
+
+      <label for="ui_auth_enabled" class="checkbox-label">
+        <input
+          type="checkbox"
+          id="ui_auth_enabled"
+          name="ui_auth_enabled"
+          {% if config.ui_auth_enabled %}checked{% endif %}
+        />
+        Require login for dashboard pages
+      </label>
+
+      <label for="ui_username">Username</label>
+      <input
+        type="text"
+        id="ui_username"
+        name="ui_username"
+        value="{{ config.ui_username }}"
+        autocomplete="username"
+      />
+
+      <label for="ui_password">New password</label>
+      <input
+        type="password"
+        id="ui_password"
+        name="ui_password"
+        autocomplete="new-password"
+        placeholder="Leave blank to keep current password"
+      />
+
+      <label for="ui_password_confirm">Confirm password</label>
+      <input
+        type="password"
+        id="ui_password_confirm"
+        name="ui_password_confirm"
+        autocomplete="new-password"
+        placeholder="Repeat new password"
+      />
+
+      <p class="form-help">
+        Authentication is optional by default. Enable it to require users to log in before accessing the dashboard. Leave the
+        password fields blank to keep the existing password.
+      </p>
+
+      <button type="submit" class="button primary">Update Authentication</button>
+    </form>
+  </section>
+{% endblock %}
