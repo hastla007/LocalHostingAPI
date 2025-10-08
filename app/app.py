@@ -397,9 +397,6 @@ def _parse_origin(value: Optional[str]) -> Optional[str]:
 def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
     """Reject cross-site form submissions when API keys are not supplied."""
 
-    if getattr(g, "api_key_authenticated", False):
-        return None
-
     def _reject(message: str, status_code: int = 403) -> Response:
         payload = {"error": message}
         if response_format == "box":
@@ -411,6 +408,12 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
     allowed_origin = _parse_origin(request.host_url)
     origin = _parse_origin(request.headers.get("Origin"))
     referer = _parse_origin(request.headers.get("Referer"))
+
+    # Browser contexts typically supply an Origin or Referer header. When neither
+    # header is present and an API key authenticated the request, treat it as a
+    # non-browser client and skip CSRF validation.
+    if not origin and not referer and getattr(g, "api_key_authenticated", False):
+        return None
 
     for candidate in (origin, referer):
         if candidate and candidate != allowed_origin:
