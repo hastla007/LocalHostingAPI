@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -214,16 +215,15 @@ def _load_secret_key() -> str:
 
 _SECRET_KEY_VALUE: Optional[str] = None
 _api_key_serializer: Optional[URLSafeSerializer] = None
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def sanitize_log_value(value: Any) -> Any:
     """Remove control characters from log values to prevent log injection."""
 
     if isinstance(value, str):
-        return (
-            value.replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
+        return _CONTROL_CHAR_PATTERN.sub(
+            lambda match: f"\\x{ord(match.group()):02x}", value
         )
     return value
 

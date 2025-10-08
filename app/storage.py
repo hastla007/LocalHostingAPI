@@ -5,8 +5,9 @@ import sqlite3
 import time
 import hashlib
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Generator
 from urllib.parse import quote
 
 from werkzeug.security import generate_password_hash
@@ -266,13 +267,23 @@ def prune_empty_upload_dirs(path: Path) -> None:
         current = current.parent
 
 
-def get_db() -> sqlite3.Connection:
+@contextmanager
+def get_db() -> Generator[sqlite3.Connection, None, None]:
     ensure_directories()
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 RESERVED_DIRECT_PATHS = {
@@ -287,6 +298,13 @@ RESERVED_DIRECT_PATHS = {
     "uploads",
     "data",
     "favicon.ico",
+    "health",
+    "upload-a-file",
+    "apikeys",
+    "login",
+    "logout",
+    "2.0",
+    "s3",
 }
 
 
@@ -450,41 +468,34 @@ def register_file(
     direct_path: Optional[str] = None
     max_attempts = 5
     for attempt in range(max_attempts):
-        conn = None
         try:
-            conn = get_db()
-            conn.execute("BEGIN IMMEDIATE")
-            direct_path = _generate_unique_direct_path(conn, original_name, file_id)
-            conn.execute(
-                """
-                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    file_id,
-                    original_name,
-                    stored_name,
-                    content_type,
-                    size,
-                    uploaded_at,
-                    expires_at,
-                    direct_path,
-                ),
-            )
-            conn.commit()
-            conn.close()
+            with get_db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                direct_path = _generate_unique_direct_path(
+                    conn, original_name, file_id
+                )
+                conn.execute(
+                    """
+                    INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_id,
+                        original_name,
+                        stored_name,
+                        content_type,
+                        size,
+                        uploaded_at,
+                        expires_at,
+                        direct_path,
+                    ),
+                )
             break
         except sqlite3.IntegrityError as error:
-            if conn is not None:
-                conn.rollback()
-                conn.close()
             if "direct_path" not in str(error) or attempt == max_attempts - 1:
                 raise
             time.sleep(0.05 * (attempt + 1))
         except Exception:
-            if conn is not None:
-                conn.rollback()
-                conn.close()
             raise
 
     logger.info(
@@ -523,12 +534,27 @@ def delete_file(file_id: str) -> bool:
         return False
     stored_name = record["stored_name"]
     file_path = get_storage_path(file_id, stored_name)
-    if file_path.exists():
-        file_path.unlink()
-        prune_empty_upload_dirs(file_path.parent)
-    with get_db() as conn:
-        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
-        conn.commit()
+    try:
+        with get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return False
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    prune_empty_upload_dirs(file_path.parent)
+                except OSError as error:
+                    logger.warning(
+                        "file_delete_disk_failed file_id=%s path=%s error=%s",
+                        file_id,
+                        file_path,
+                        error,
+                    )
+                    raise RuntimeError("disk_delete_failed") from error
+    except RuntimeError:
+        return False
     logger.info(
         "file_deleted file_id=%s stored_name=%s original_name=%s",
         file_id,
