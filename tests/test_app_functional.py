@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote, urlparse
 from xml.etree import ElementTree as ET
 
@@ -184,6 +185,38 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         html = hosting_page.data.decode()
         self.assertIn("first.txt", html)
         self.assertIn("second.txt", html)
+
+    def test_multi_file_upload_rolls_back_on_failure(self):
+        original_register = self.app_module.register_file
+        call_tracker = {"count": 0}
+
+        def register_side_effect(*args, **kwargs):
+            if call_tracker["count"] == 0:
+                call_tracker["count"] += 1
+                return original_register(*args, **kwargs)
+            call_tracker["count"] += 1
+            raise RuntimeError("forced failure")
+
+        with mock.patch("app.app.register_file", side_effect=register_side_effect):
+            response = self.client.post(
+                "/fileupload",
+                data={
+                    "file": [
+                        (io.BytesIO(b"valid"), "ok.txt"),
+                        (io.BytesIO(b"second"), "boom.txt"),
+                    ],
+                    "retention_hours": "1",
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertIn("errors", payload)
+        self.assertGreaterEqual(len(payload["errors"]), 1)
+
+        files = self.storage.list_files()
+        self.assertEqual(len(files), 0)
 
     def test_settings_update_persists(self):
         retention_response = self.client.post(

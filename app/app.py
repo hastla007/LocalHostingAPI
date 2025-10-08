@@ -19,7 +19,9 @@ from secrets import compare_digest
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from xml.etree.ElementTree import Element, SubElement, tostring
 from logging.handlers import RotatingFileHandler
-from urllib.parse import urlencode as _compat_urlencode
+from urllib.parse import urlencode as _compat_urlencode, urlparse
+
+from markupsafe import escape
 
 from itsdangerous import BadSignature, URLSafeSerializer
 
@@ -232,20 +234,82 @@ def validate_upload_mimetype(filename: str, declared_type: Optional[str]) -> boo
     if not filename or not declared_type:
         return True
 
+    declared_type = declared_type.strip().lower()
     guessed_type, _ = mimetypes.guess_type(filename)
     if not guessed_type:
         return True
 
-    declared_major = declared_type.split("/", 1)[0].lower()
-    guessed_major = guessed_type.split("/", 1)[0].lower()
-
-    if declared_major == "text" or guessed_major == "text":
+    guessed_type = guessed_type.lower()
+    if declared_type == guessed_type:
         return True
 
-    if declared_major == "application" or guessed_major == "application":
+    declared_major = declared_type.split("/", 1)[0]
+    guessed_major = guessed_type.split("/", 1)[0]
+
+    # Permit text types to be interchangeable (e.g., text/plain vs text/csv).
+    if declared_major == "text" and guessed_major == "text":
+        return True
+
+    # Allow binary "octet-stream" fallbacks when the extension is unknown.
+    if "octet-stream" in {declared_type, guessed_type}:
         return True
 
     return declared_major == guessed_major
+
+
+class AmbiguousAPIKeyError(Exception):
+    """Raised when multiple API keys are provided in a single request."""
+
+
+def rollback_successful_uploads(file_ids: Iterable[str]) -> None:
+    for uploaded_id in file_ids:
+        try:
+            delete_file(uploaded_id)
+        except Exception:
+            lifecycle_logger.warning(
+                "rollback_delete_failed file_id=%s",
+                sanitize_log_value(uploaded_id),
+            )
+
+
+def _parse_origin(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    if value.strip().lower() == "null":
+        return None
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
+    """Reject cross-site form submissions when API keys are not supplied."""
+
+    if getattr(g, "api_key_authenticated", False):
+        return None
+
+    allowed_origin = _parse_origin(request.host_url)
+    origin = _parse_origin(request.headers.get("Origin"))
+    referer = _parse_origin(request.headers.get("Referer"))
+
+    for candidate in (origin, referer):
+        if candidate and candidate != allowed_origin:
+            lifecycle_logger.warning(
+                "csrf_blocked origin=%s path=%s",
+                sanitize_log_value(candidate or "unknown"),
+                sanitize_log_value(request.path),
+            )
+            message = {"error": "Cross-site requests are not allowed"}
+            if response_format == "box":
+                return _box_error("access_denied", message["error"], status=403)
+            if response_format == "s3":
+                return _s3_error_response(
+                    "AccessDenied", message["error"], status_code=403
+                )
+            return jsonify(message), 403
+
+    return None
 
 
 def get_secret_key_value() -> str:
@@ -685,27 +749,33 @@ def render_api_keys_page(config: Dict[str, Any]):
 
 
 def _extract_api_key_from_request() -> Optional[str]:
+    candidates: List[str] = []
+
     header_key = request.headers.get("X-API-Key")
     if header_key:
-        return header_key.strip()
+        candidates.append(header_key.strip())
 
     authorization = request.headers.get("Authorization", "").strip()
     if authorization.lower().startswith("bearer "):
-        return authorization[7:].strip()
-    if authorization.lower().startswith("token "):
-        return authorization[6:].strip()
+        candidates.append(authorization[7:].strip())
+    elif authorization.lower().startswith("token "):
+        candidates.append(authorization[6:].strip())
 
     query_key = request.args.get("api_key")
     if query_key:
-        return query_key.strip()
+        candidates.append(query_key.strip())
 
     if request.is_json:
         payload = request.get_json(silent=True) or {}
         if isinstance(payload, dict):
             json_key = payload.get("api_key")
             if isinstance(json_key, str):
-                return json_key.strip()
-    return None
+                candidates.append(json_key.strip())
+
+    unique = {candidate for candidate in candidates if candidate}
+    if len(unique) > 1:
+        raise AmbiguousAPIKeyError("Multiple API keys provided")
+    return next(iter(unique)) if unique else None
 
 
 def _api_auth_error(response_format: str = "json") -> Response:
@@ -731,14 +801,33 @@ def require_api_auth(response_format: str = "json"):
     def decorator(view: Callable):
         @wraps(view)
         def wrapped(*args, **kwargs):
+            g.api_key_authenticated = False
             if not api_auth_enabled():
                 return view(*args, **kwargs)
 
             if ui_auth_enabled() and ui_user_authenticated():
+                g.api_key_authenticated = False
                 return view(*args, **kwargs)
 
-            provided = _extract_api_key_from_request()
+            try:
+                provided = _extract_api_key_from_request()
+            except AmbiguousAPIKeyError:
+                message = "Multiple API keys provided"
+                lifecycle_logger.warning(
+                    "api_auth_ambiguous_keys endpoint=%s method=%s",
+                    request.endpoint,
+                    request.method,
+                )
+                if response_format == "box":
+                    return _box_error("access_denied", message, status=400)
+                if response_format == "s3":
+                    return _s3_error_response(
+                        "AccessDenied", message, status_code=400
+                    )
+                return make_response(jsonify({"error": message}), 400)
+
             if _api_key_matches(provided):
+                g.api_key_authenticated = True
                 return view(*args, **kwargs)
 
             lifecycle_logger.warning(
@@ -1278,6 +1367,7 @@ def hosting():
     search = request.args.get("search", "").strip()
     sort_by = request.args.get("sort", "uploaded_at")
     sort_order = request.args.get("order", "desc").lower()
+    sort_order = sort_order if sort_order in {"asc", "desc"} else "desc"
 
     files = list(iter_files(list_files()))
 
@@ -1611,7 +1701,7 @@ def api_keys():
                 lifecycle_logger.info("api_key_generated id=%s", auto_key["id"])
                 if auto_key_raw:
                     session["last_generated_api_key"] = auto_key_raw
-                    flash(f"Generated new API key: {auto_key_raw}", "success")
+                    flash(f"Generated new API key: {escape(auto_key_raw)}", "success")
                     flash("Copy this key now! You won't be able to see it again.", "warning")
                 flash(
                     "API authentication enabled. A new key was generated automatically.",
@@ -1639,7 +1729,7 @@ def api_keys():
             )
             if new_key_raw:
                 session["last_generated_api_key"] = new_key_raw
-                flash(f"Generated new API key: {new_key_raw}", "success")
+                flash(f"Generated new API key: {escape(new_key_raw)}", "success")
                 flash("Copy this key now! You won't be able to see it again.", "warning")
 
         elif action == "delete_api_key":
@@ -1742,6 +1832,10 @@ def fileupload():
         if not acquired:
             return jsonify({"error": "Too many concurrent uploads"}), 503
 
+        origin_error = ensure_same_origin("json")
+        if origin_error is not None:
+            return origin_error
+
         if "file" not in request.files:
             app.logger.warning("upload_failed reason=no_file_part")
             return jsonify({"error": "No file part"}), 400
@@ -1812,6 +1906,7 @@ def fileupload():
 
         results = []
         failures: List[Dict[str, str]] = list(size_failures)
+        successful_file_ids: List[str] = []
         for upload, filename in valid_uploads:
             upload_path = None
             temp_path = None
@@ -1836,6 +1931,7 @@ def fileupload():
                 if max_bytes and size > max_bytes:
                     upload_path.unlink(missing_ok=True)
                     prune_empty_upload_dirs(upload_path.parent)
+                    remove_orphaned_record(file_id)
                     failures.append(
                         {
                             "filename": filename,
@@ -1931,16 +2027,20 @@ def fileupload():
                     "message": "File uploaded successfully.",
                 }
             )
+            successful_file_ids.append(file_id)
+
+        if failures:
+            rollback_successful_uploads(successful_file_ids)
+            status = 413 if any(entry.get("reason") == "too_large" for entry in failures) else 400
+            return (
+                jsonify({"message": "Failed to upload files.", "errors": failures}),
+                status,
+            )
 
         if not results:
-            status = 413 if any(entry.get("reason") == "too_large" for entry in failures) else 500
-            message = {
-                "message": "Failed to upload files.",
-                "errors": failures,
-            }
-            return jsonify(message), status
+            return jsonify({"message": "Failed to upload files.", "errors": []}), 400
 
-        if len(results) == 1 and not failures:
+        if len(results) == 1:
             return jsonify(results[0]), 201
 
         response_payload: Dict[str, object] = {
@@ -1948,11 +2048,6 @@ def fileupload():
             "files": results,
             "retention_hours": retention_hours,
         }
-        if failures:
-            response_payload["message"] = (
-                f"Uploaded {len(results)} files successfully; {len(failures)} failed."
-            )
-            response_payload["failed_files"] = failures
         return jsonify(response_payload), 201
 
 
@@ -2045,6 +2140,10 @@ def box_upload_files():
                 "service_busy", "Too many concurrent uploads. Try again shortly.", status=503
             )
 
+        origin_error = ensure_same_origin("box")
+        if origin_error is not None:
+            return origin_error
+
         config = get_config()
         uploads = request.files.getlist("file")
         if not uploads:
@@ -2101,6 +2200,7 @@ def box_upload_files():
             return _box_error("retention_invalid", str(error), context=context)
 
         entries = []
+        successful_file_ids: List[str] = []
         for upload in uploads:
             if (
                 not isinstance(upload, FileStorage)
@@ -2192,6 +2292,7 @@ def box_upload_files():
                         upload.stream.close()
                     except OSError:
                         pass
+                rollback_successful_uploads(successful_file_ids)
                 return _box_error(
                     "file_too_large",
                     "The uploaded file exceeds the allowed size.",
@@ -2212,6 +2313,7 @@ def box_upload_files():
                         upload.stream.close()
                     except OSError:
                         pass
+                rollback_successful_uploads(successful_file_ids)
                 return _box_error(
                     "internal_error",
                     "Failed to store uploaded file.",
@@ -2228,6 +2330,7 @@ def box_upload_files():
                     "box_upload_failed reason=registration_missing file_id=%s",
                     file_id,
                 )
+                rollback_successful_uploads(successful_file_ids)
                 return _box_error(
                     "internal_error",
                     f"Failed to register file {original_name}",
@@ -2288,6 +2391,7 @@ def box_upload_files():
                 size,
                 retention_hours,
             )
+            successful_file_ids.append(file_id)
 
         if not entries:
             return _box_error("no_valid_files", "No valid files were provided.")
@@ -2456,6 +2560,10 @@ def s3_multipart_upload(bucket: str):
                 status_code=503,
             )
 
+        origin_error = ensure_same_origin("s3")
+        if origin_error is not None:
+            return origin_error
+
         config = get_config()
         upload = request.files.get("file")
         if not isinstance(upload, FileStorage):
@@ -2488,7 +2596,8 @@ def s3_multipart_upload(bucket: str):
             or f"upload-{uuid.uuid4().hex}"
         )
         if "${filename}" in key and upload.filename:
-            key = key.replace("${filename}", upload.filename)
+            substitution = secure_filename(upload.filename) or upload.filename
+            key = key.replace("${filename}", substitution)
 
         original_name = (
             request.form.get("x-amz-meta-original-filename")
@@ -2692,6 +2801,10 @@ def s3_put_object(bucket: str, key: str):
                 key=key,
                 status_code=503,
             )
+
+        origin_error = ensure_same_origin("s3")
+        if origin_error is not None:
+            return origin_error
 
         config = get_config()
         stream = request.stream

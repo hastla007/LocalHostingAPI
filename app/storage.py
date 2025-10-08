@@ -450,31 +450,42 @@ def register_file(
     direct_path: Optional[str] = None
     max_attempts = 5
     for attempt in range(max_attempts):
+        conn = None
         try:
-            with get_db() as conn:
-                direct_path = _generate_unique_direct_path(conn, original_name, file_id)
-                conn.execute(
-                    """
-                    INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        file_id,
-                        original_name,
-                        stored_name,
-                        content_type,
-                        size,
-                        uploaded_at,
-                        expires_at,
-                        direct_path,
-                    ),
-                )
-                conn.commit()
+            conn = get_db()
+            conn.execute("BEGIN IMMEDIATE")
+            direct_path = _generate_unique_direct_path(conn, original_name, file_id)
+            conn.execute(
+                """
+                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    file_id,
+                    original_name,
+                    stored_name,
+                    content_type,
+                    size,
+                    uploaded_at,
+                    expires_at,
+                    direct_path,
+                ),
+            )
+            conn.commit()
+            conn.close()
             break
         except sqlite3.IntegrityError as error:
+            if conn is not None:
+                conn.rollback()
+                conn.close()
             if "direct_path" not in str(error) or attempt == max_attempts - 1:
                 raise
             time.sleep(0.05 * (attempt + 1))
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+                conn.close()
+            raise
 
     logger.info(
         "upload_registered file_id=%s original_name=%s size=%d retention_hours=%.2f expires_at=%f direct_path=%s",
