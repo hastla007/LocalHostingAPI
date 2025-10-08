@@ -84,6 +84,7 @@
 
       let autoTimer = null;
       let activeInterval = null;
+      let visibilityPaused = false;
 
       const clearAuto = () => {
         if (autoTimer) {
@@ -91,6 +92,7 @@
           autoTimer = null;
         }
         activeInterval = null;
+        visibilityPaused = false;
         autoButtons.forEach((button) => button.classList.remove('active'));
         if (autoStatus) {
           autoStatus.classList.remove('error');
@@ -108,6 +110,7 @@
         clearAuto();
         activeInterval = intervalSeconds;
         button.classList.add('active');
+        visibilityPaused = false;
         if (autoStatus) {
           autoStatus.classList.remove('error');
           autoStatus.style.color = '';
@@ -115,6 +118,38 @@
           autoStatus.textContent = `Auto-refresh: every ${intervalSeconds}s`;
         }
         autoTimer = window.setInterval(fetchLogs, intervalSeconds * 1000);
+      };
+
+      const pauseAutoRefresh = () => {
+        if (!autoTimer || !activeInterval) {
+          return;
+        }
+        window.clearInterval(autoTimer);
+        autoTimer = null;
+        visibilityPaused = true;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = 'Auto-refresh: paused';
+        }
+      };
+
+      const resumeAutoRefresh = () => {
+        if (!activeInterval || autoTimer || !visibilityPaused) {
+          return;
+        }
+        autoTimer = window.setInterval(fetchLogs, activeInterval * 1000);
+        visibilityPaused = false;
+        if (autoStatus) {
+          autoStatus.classList.remove('error');
+          autoStatus.style.color = '';
+          autoStatus.style.fontWeight = '';
+          autoStatus.textContent = `Auto-refresh: every ${activeInterval}s`;
+        }
+        if (typeof fetchLogs === 'function') {
+          fetchLogs();
+        }
       };
 
       const renderPayload = (payload) => {
@@ -255,6 +290,14 @@
       });
 
       window.fetchLogs = fetchLogs;
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          pauseAutoRefresh();
+        } else {
+          resumeAutoRefresh();
+        }
+      });
     })();
   </script>
 {% endblock %}

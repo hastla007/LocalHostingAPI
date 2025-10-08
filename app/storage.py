@@ -637,11 +637,29 @@ def cleanup_orphaned_files() -> int:
         cursor = conn.execute("SELECT stored_name FROM files")
         valid_names = {row["stored_name"] for row in cursor.fetchall()}
 
-    for shard_dir in UPLOADS_DIR.iterdir():
-        if not shard_dir.is_dir():
+    for entry in UPLOADS_DIR.iterdir():
+        if entry.is_file():
+            stored_name = entry.name
+            if stored_name.endswith(".tmp"):
+                continue
+
+            if stored_name not in valid_names:
+                try:
+                    entry.unlink()
+                    removed += 1
+                    logger.info("orphan_file_removed path=%s", entry)
+                except OSError as error:
+                    logger.warning(
+                        "orphan_cleanup_failed path=%s error=%s",
+                        entry,
+                        error,
+                    )
             continue
 
-        for file_path in shard_dir.iterdir():
+        if not entry.is_dir():
+            continue
+
+        for file_path in entry.iterdir():
             if not file_path.is_file():
                 continue
 
@@ -661,7 +679,7 @@ def cleanup_orphaned_files() -> int:
                         error,
                     )
 
-        prune_empty_upload_dirs(shard_dir)
+        prune_empty_upload_dirs(entry)
 
     if removed:
         logger.info("orphan_cleanup_completed removed=%d", removed)

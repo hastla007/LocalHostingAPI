@@ -334,15 +334,16 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
                 or request.headers.get("X-CSRFToken")
                 or request.headers.get("X-CSRF-Token")
             )
-            try:
-                validate_csrf(token)
-            except Exception as error:
-                lifecycle_logger.warning(
-                    "csrf_token_invalid path=%s error=%s",
-                    sanitize_log_value(request.path),
-                    sanitize_log_value(str(error)),
-                )
-                return _reject("Invalid or missing CSRF token")
+            if token:
+                try:
+                    validate_csrf(token)
+                except Exception as error:
+                    lifecycle_logger.warning(
+                        "csrf_token_invalid path=%s error=%s",
+                        sanitize_log_value(request.path),
+                        sanitize_log_value(str(error)),
+                    )
+                    return _reject("Invalid or missing CSRF token")
 
     allowed_origin = _parse_origin(request.host_url)
     origin = _parse_origin(request.headers.get("Origin"))
@@ -821,7 +822,29 @@ def render_settings_page(config: Dict[str, Any]):
 def render_api_keys_page(config: Dict[str, Any]):
     """Render the API key management dashboard."""
 
-    new_api_key = session.pop("last_generated_api_key", None)
+    new_api_key: Optional[str] = None
+    stored_key = session.get("last_generated_api_key")
+    if isinstance(stored_key, dict):
+        value = stored_key.get("value")
+        created_at = float(stored_key.get("created_at", 0))
+        viewed = bool(stored_key.get("viewed"))
+        ttl_expires = created_at + 600 if created_at else 0
+
+        if value and (not ttl_expires or ttl_expires > time.time()):
+            new_api_key = value
+            if viewed:
+                session.pop("last_generated_api_key", None)
+            else:
+                stored_key["viewed"] = True
+                session["last_generated_api_key"] = stored_key
+                session.modified = True
+        else:
+            session.pop("last_generated_api_key", None)
+    elif stored_key is not None:
+        # Legacy string storage
+        new_api_key = str(stored_key)
+        session.pop("last_generated_api_key", None)
+
     return render_template(
         "api_keys.html",
         config=config,
@@ -926,10 +949,7 @@ def _generate_api_key_entry(label: str = "") -> dict:
     raw_key = secrets.token_urlsafe(32)
     encrypted = _encrypt_api_key(raw_key)
     if encrypted is None:
-        encrypted = ""
-        logging.getLogger("localhosting.security").warning(
-            "storing_api_key_without_encrypted_copy"
-        )
+        raise RuntimeError("Failed to encrypt API key")
     return {
         "id": uuid.uuid4().hex,
         "key": raw_key,
@@ -1651,9 +1671,9 @@ def settings():
             if retention_min < 0:
                 flash("Minimum retention cannot be negative.", "error")
                 return render_settings_page(proposed)
-            if retention_max < retention_min:
+            if retention_max <= retention_min:
                 flash(
-                    "Maximum retention must be greater than or equal to the minimum.",
+                    "Maximum retention must be greater than the minimum.",
                     "error",
                 )
                 return render_settings_page(proposed)
@@ -1764,12 +1784,14 @@ def settings():
             get_config(refresh=True)
             refreshed = True
 
+            session.pop("ui_authenticated", None)
+            session.pop("ui_username", None)
+
             if auth_enabled:
-                session["ui_authenticated"] = True
-                session["ui_username"] = proposed["ui_username"]
-            else:
-                session.pop("ui_authenticated", None)
-                session.pop("ui_username", None)
+                flash(
+                    "UI authentication updated. Please sign in with the new credentials.",
+                    "info",
+                )
 
             lifecycle_logger.info(
                 "ui_auth_updated enabled=%s username=%s",
@@ -1820,7 +1842,18 @@ def api_keys():
             auto_key = None
             auto_key_raw = None
             if enable_api_auth and not list(_iter_api_keys(proposed)):
-                generated_key = _generate_api_key_entry()
+                try:
+                    generated_key = _generate_api_key_entry()
+                except RuntimeError as error:
+                    lifecycle_logger.error(
+                        "api_key_generate_failed reason=encrypt_error error=%s",
+                        sanitize_log_value(str(error)),
+                    )
+                    flash(
+                        "Unable to generate API key. Please try again later.",
+                        "error",
+                    )
+                    return redirect(url_for("api_keys"))
                 auto_key_raw = generated_key.pop("key")
                 auto_key = generated_key
                 proposed.setdefault("api_keys", []).append(generated_key)
@@ -1834,7 +1867,12 @@ def api_keys():
             if auto_key:
                 lifecycle_logger.info("api_key_generated id=%s", auto_key["id"])
                 if auto_key_raw:
-                    session["last_generated_api_key"] = auto_key_raw
+                    session["last_generated_api_key"] = {
+                        "value": auto_key_raw,
+                        "created_at": time.time(),
+                        "viewed": False,
+                    }
+                    session.modified = True
                     flash(f"Generated new API key: {escape(auto_key_raw)}", "success")
                     flash("Copy this key now! You won't be able to see it again.", "warning")
                 flash(
@@ -1845,7 +1883,15 @@ def api_keys():
 
         elif action == "generate_api_key":
             label = request.form.get("api_key_label", "").strip()
-            new_key = _generate_api_key_entry(label)
+            try:
+                new_key = _generate_api_key_entry(label)
+            except RuntimeError as error:
+                lifecycle_logger.error(
+                    "api_key_generate_failed reason=encrypt_error error=%s",
+                    sanitize_log_value(str(error)),
+                )
+                flash("Unable to generate API key. Please try again later.", "error")
+                return redirect(url_for("api_keys"))
             new_key_raw = new_key.pop("key")
             proposed = deepcopy(config)
             proposed.setdefault("api_keys", []).append(new_key)
@@ -1862,7 +1908,12 @@ def api_keys():
                 sanitize_log_value(label or ""),
             )
             if new_key_raw:
-                session["last_generated_api_key"] = new_key_raw
+                session["last_generated_api_key"] = {
+                    "value": new_key_raw,
+                    "created_at": time.time(),
+                    "viewed": False,
+                }
+                session.modified = True
                 flash(f"Generated new API key: {escape(new_key_raw)}", "success")
                 flash("Copy this key now! You won't be able to see it again.", "warning")
 
@@ -2077,18 +2128,31 @@ def fileupload():
                         upload.stream.seek(0)
                     except (OSError, IOError):
                         pass
-                upload.save(str(temp_path))
-                if hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
-                temp_path.replace(upload_path)
-                size = upload_path.stat().st_size
-                if max_bytes and size > max_bytes:
-                    upload_path.unlink(missing_ok=True)
-                    prune_empty_upload_dirs(upload_path.parent)
-                    remove_orphaned_record(file_id)
+                written = 0
+                too_large = False
+                try:
+                    with temp_path.open("wb") as destination:
+                        while True:
+                            chunk = upload.stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            if max_bytes and written + len(chunk) > max_bytes:
+                                too_large = True
+                                break
+                            destination.write(chunk)
+                            written += len(chunk)
+                finally:
+                    if hasattr(upload.stream, "close"):
+                        try:
+                            upload.stream.close()
+                        except OSError:
+                            pass
+
+                if too_large:
+                    if temp_path and temp_path.exists():
+                        parent = temp_path.parent
+                        temp_path.unlink(missing_ok=True)
+                        prune_empty_upload_dirs(parent)
                     failures.append(
                         {
                             "filename": filename,
@@ -2096,6 +2160,9 @@ def fileupload():
                         }
                     )
                     continue
+
+                temp_path.replace(upload_path)
+                size = written if written else upload_path.stat().st_size
 
                 file_id = register_file(
                     original_name=filename,

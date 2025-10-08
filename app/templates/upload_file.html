@@ -252,7 +252,7 @@
           if (!event.lengthComputable) {
             return;
           }
-          const percent = Math.round((event.loaded / event.total) * 100);
+          const percent = event.total > 0 ? Math.round((event.loaded / event.total) * 100) : 0;
           progressBar.style.width = `${percent}%`;
           progressBar.setAttribute('aria-valuenow', String(percent));
           showStatus(`Uploading ${activeFile.name}… ${percent}%`, 'info');

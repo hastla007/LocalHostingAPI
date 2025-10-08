@@ -739,7 +739,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(enable.status_code, 302)
 
         with self.client.session_transaction() as session:
-            api_key = session.get("last_generated_api_key")
+            stored_key = session.get("last_generated_api_key")
+            if isinstance(stored_key, dict):
+                api_key = stored_key.get("value")
+            else:
+                api_key = stored_key
 
         self.assertIsNotNone(api_key)
         self.client.get(enable.headers["Location"], follow_redirects=True)
@@ -782,7 +786,11 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             follow_redirects=False,
         )
         with self.client.session_transaction() as session:
-            api_key = session.get("last_generated_api_key")
+            stored_key = session.get("last_generated_api_key")
+            if isinstance(stored_key, dict):
+                api_key = stored_key.get("value")
+            else:
+                api_key = stored_key
 
         self.assertIsNotNone(api_key)
         self.client.get(enable.headers["Location"], follow_redirects=True)
@@ -835,8 +843,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             follow_redirects=False,
         )
         with self.client.session_transaction() as session:
-            generated_key = session.get("last_generated_api_key")
-        self.assertIsNotNone(generated_key)
+            stored_key = session.get("last_generated_api_key")
+        self.assertIsNotNone(stored_key)
         self.client.get(generate.headers["Location"], follow_redirects=True)
         config = self.storage.load_config()
         self.assertGreaterEqual(len(config["api_keys"]), 2)
