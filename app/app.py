@@ -62,8 +62,12 @@ except Exception:  # pragma: no cover - defensive best-effort shim
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.jobstores.base import JobLookupError
 except ModuleNotFoundError:  # pragma: no cover - fallback for offline environments
     BackgroundScheduler = None  # type: ignore[assignment]
+
+    class JobLookupError(Exception):
+        """Fallback job lookup error used when APScheduler is unavailable."""
 
 try:
     from flask_limiter import Limiter
@@ -477,6 +481,66 @@ def _apply_upload_limit(config: Dict[str, Any]) -> None:
     flask_app.config["MAX_UPLOAD_SIZE_MB"] = size_mb
 
 
+def _coerce_positive_int(value: Any, fallback: int) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return max(1, fallback)
+    return max(1, parsed)
+
+
+def _apply_concurrency_limit(config: Dict[str, Any]) -> None:
+    global upload_semaphore, max_concurrent_uploads_setting
+
+    new_limit = _coerce_positive_int(
+        config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or 10
+    )
+
+    if new_limit != max_concurrent_uploads_setting:
+        upload_semaphore = Semaphore(new_limit)
+        max_concurrent_uploads_setting = new_limit
+
+
+def _apply_cleanup_schedule(config: Dict[str, Any]) -> None:
+    global cleanup_interval_minutes_setting, scheduler, _fallback_schedulers
+
+    new_interval = _coerce_positive_int(
+        config.get("cleanup_interval_minutes"), cleanup_interval_minutes_setting or 5
+    )
+
+    if new_interval == cleanup_interval_minutes_setting:
+        return
+
+    cleanup_interval_minutes_setting = new_interval
+
+    if BackgroundScheduler is not None and scheduler is not None:
+        try:
+            scheduler.reschedule_job(
+                "cleanup_expired_files",
+                trigger="interval",
+                minutes=max(1, new_interval),
+            )
+        except JobLookupError:
+            scheduler.add_job(
+                func=cleanup_expired_files,
+                trigger="interval",
+                minutes=max(1, new_interval),
+                id="cleanup_expired_files",
+                name="Clean up expired files",
+                replace_existing=True,
+            )
+    else:
+        for worker in _fallback_schedulers:
+            if getattr(worker, "func", None) is cleanup_expired_files:
+                worker.update_interval(new_interval)
+
+
+def _apply_runtime_settings(config: Dict[str, Any]) -> None:
+    _apply_upload_limit(config)
+    _apply_concurrency_limit(config)
+    _apply_cleanup_schedule(config)
+
+
 def get_config(refresh: bool = False) -> Dict[str, Any]:
     global _CONFIG_CACHE
     if refresh or _CONFIG_CACHE is None:
@@ -492,7 +556,7 @@ def get_config(refresh: bool = False) -> Dict[str, Any]:
     else:
         config = _CONFIG_CACHE
 
-    _apply_upload_limit(config)
+    _apply_runtime_settings(config)
     return config
 
 
@@ -562,12 +626,22 @@ def render_settings_page(config: Dict[str, Any]):
     storage_quota_limit = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
 
     performance_settings = {
-        "max_concurrent_uploads": max_concurrent_uploads,
-        "cleanup_interval_minutes": cleanup_interval,
+        "max_concurrent_uploads": _coerce_positive_int(
+            config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or 10
+        ),
+        "cleanup_interval_minutes": _coerce_positive_int(
+            config.get("cleanup_interval_minutes"), cleanup_interval_minutes_setting or 5
+        ),
         "rate_limits": {
-            "upload_per_hour": UPLOAD_RATE_LIMIT_COUNT,
-            "login_per_minute": LOGIN_RATE_LIMIT_COUNT,
-            "download_per_minute": DOWNLOAD_RATE_LIMIT_COUNT,
+            "upload_per_hour": _coerce_positive_int(
+                config.get("upload_rate_limit_per_hour"), 100
+            ),
+            "login_per_minute": _coerce_positive_int(
+                config.get("login_rate_limit_per_minute"), 10
+            ),
+            "download_per_minute": _coerce_positive_int(
+                config.get("download_rate_limit_per_minute"), 120
+            ),
         },
     }
 
@@ -714,12 +788,23 @@ class _FallbackCleanupScheduler:
         if wait and self._thread.is_alive():
             self._thread.join()
 
+    def update_interval(self, minutes: int) -> None:
+        """Update the interval used for scheduled execution."""
+
+        self.interval_seconds = max(60, minutes * 60)
+
     def _run(self) -> None:
         while not self._stop_event.wait(self.interval_seconds):
             try:
                 self.func()
             except Exception:  # pragma: no cover - defensive logging
                 self._logger.exception("Cleanup job failed")
+
+scheduler = None
+_fallback_schedulers: List[_FallbackCleanupScheduler] = []
+max_concurrent_uploads_setting = 1
+cleanup_interval_minutes_setting = 5
+upload_semaphore = Semaphore(max_concurrent_uploads_setting)
 
 app = Flask(__name__)
 
@@ -729,17 +814,6 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"],
     storage_uri=os.environ.get("LOCALHOSTING_RATE_LIMIT_STORAGE", "memory://"),
 )
-
-
-def _get_positive_int_env(env_key: str, default: int) -> int:
-    raw_value = os.environ.get(env_key)
-    if raw_value is None:
-        return max(1, default)
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        return max(1, default)
-    return max(1, parsed)
 
 
 def _get_optional_float_env(env_key: str) -> Optional[float]:
@@ -774,30 +848,33 @@ def _get_optional_bool_env(env_key: str) -> Optional[bool]:
     return None
 
 
-UPLOAD_RATE_LIMIT_COUNT = _get_positive_int_env(
-    "LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", 100
-)
-LOGIN_RATE_LIMIT_COUNT = _get_positive_int_env(
-    "LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", 10
-)
-DOWNLOAD_RATE_LIMIT_COUNT = _get_positive_int_env(
-    "LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", 120
-)
+def upload_rate_limit_string() -> str:
+    config = get_config()
+    value = _coerce_positive_int(config.get("upload_rate_limit_per_hour"), 100)
+    return f"{value} per hour"
 
-UPLOAD_RATE_LIMIT = f"{UPLOAD_RATE_LIMIT_COUNT} per hour"
-LOGIN_RATE_LIMIT = f"{LOGIN_RATE_LIMIT_COUNT} per minute"
-DOWNLOAD_RATE_LIMIT = f"{DOWNLOAD_RATE_LIMIT_COUNT} per minute"
 
-try:
-    max_upload_size_mb = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500"))
-except ValueError:
-    max_upload_size_mb = 500
-app.config["MAX_CONTENT_LENGTH"] = max(1, max_upload_size_mb) * 1024 * 1024
+def login_rate_limit_string() -> str:
+    config = get_config()
+    value = _coerce_positive_int(config.get("login_rate_limit_per_minute"), 10)
+    return f"{value} per minute"
+
+
+def download_rate_limit_string() -> str:
+    config = get_config()
+    value = _coerce_positive_int(config.get("download_rate_limit_per_minute"), 120)
+    return f"{value} per minute"
+
+
+app.config["MAX_CONTENT_LENGTH"] = int(
+    _coerce_positive_int(_CONFIG_CACHE.get("max_upload_size_mb"), 500) * 1024 * 1024
+)
+app.config["MAX_UPLOAD_SIZE_MB"] = _CONFIG_CACHE.get("max_upload_size_mb", 500)
 app.config["SECRET_KEY"] = get_secret_key_value()
 csrf = CSRFProtect(app)
 app.logger.setLevel(numeric_level)
 
-_apply_upload_limit(_CONFIG_CACHE)
+_apply_runtime_settings(_CONFIG_CACHE)
 
 _base_lifecycle_logger = logging.getLogger("localhosting.lifecycle")
 _base_lifecycle_logger.setLevel(numeric_level)
@@ -941,17 +1018,16 @@ def remove_orphaned_record(file_id: str) -> None:
         )
 
 # Schedule periodic cleanup so requests are not blocked by retention pruning.
-try:
-    cleanup_interval = int(os.environ.get("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", "5"))
-except ValueError:
-    cleanup_interval = 5
+cleanup_interval_minutes_setting = _coerce_positive_int(
+    _CONFIG_CACHE.get("cleanup_interval_minutes"), cleanup_interval_minutes_setting or 5
+)
 
 if BackgroundScheduler is not None:
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(
         func=cleanup_expired_files,
         trigger="interval",
-        minutes=max(1, cleanup_interval),
+        minutes=max(1, cleanup_interval_minutes_setting),
         id="cleanup_expired_files",
         name="Clean up expired files",
         replace_existing=True,
@@ -970,7 +1046,7 @@ else:  # pragma: no cover - exercised in environments without APScheduler
     _fallback_schedulers = [
         _FallbackCleanupScheduler(
             cleanup_expired_files,
-            minutes=max(1, cleanup_interval),
+            minutes=max(1, cleanup_interval_minutes_setting),
         ),
         _FallbackCleanupScheduler(
             cleanup_orphaned_files,
@@ -1395,6 +1471,56 @@ def settings():
             )
             flash("Retention and upload size settings updated.", "success")
 
+        elif action == "update_performance":
+            field_map = {
+                "max_concurrent_uploads": request.form.get("max_concurrent_uploads"),
+                "cleanup_interval_minutes": request.form.get("cleanup_interval_minutes"),
+                "upload_rate_limit_per_hour": request.form.get("upload_rate_limit_per_hour"),
+                "login_rate_limit_per_minute": request.form.get("login_rate_limit_per_minute"),
+                "download_rate_limit_per_minute": request.form.get("download_rate_limit_per_minute"),
+            }
+
+            try:
+                parsed_values = {
+                    key: int(float(value))
+                    for key, value in field_map.items()
+                    if value not in (None, "")
+                }
+                if len(parsed_values) != len(field_map):
+                    raise ValueError
+            except (TypeError, ValueError):
+                flash("Please provide valid positive integers for performance settings.", "error")
+                proposed = deepcopy(config)
+                for key, raw_value in field_map.items():
+                    if raw_value is not None:
+                        proposed[key] = raw_value
+                return render_settings_page(proposed)
+
+            if any(value < 1 for value in parsed_values.values()):
+                flash("All performance values must be at least 1.", "error")
+                proposed = deepcopy(config)
+                for key, raw_value in field_map.items():
+                    if raw_value is not None:
+                        proposed[key] = raw_value
+                return render_settings_page(proposed)
+
+            proposed = deepcopy(config)
+            proposed.update({key: float(value) for key, value in parsed_values.items()})
+
+            save_config(proposed)
+            get_config(refresh=True)
+            refreshed = True
+
+            lifecycle_logger.info(
+                "performance_settings_updated max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d",
+                parsed_values["max_concurrent_uploads"],
+                parsed_values["cleanup_interval_minutes"],
+                parsed_values["upload_rate_limit_per_hour"],
+                parsed_values["login_rate_limit_per_minute"],
+                parsed_values["download_rate_limit_per_minute"],
+            )
+            flash("Performance settings updated.", "success")
+
         elif action == "update_ui_auth":
             auth_enabled = request.form.get("ui_auth_enabled") == "on"
             username = request.form.get("ui_username", config.get("ui_username", "admin")).strip()
@@ -1568,7 +1694,7 @@ def api_keys():
 
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit(LOGIN_RATE_LIMIT)
+@limiter.limit(lambda: login_rate_limit_string())
 def login():
     config = get_config()
     if not config.get("ui_auth_enabled"):
@@ -1615,7 +1741,7 @@ def logout():
 @csrf.exempt
 @app.route("/fileupload", methods=["POST"])
 @require_api_auth()
-@limiter.limit(UPLOAD_RATE_LIMIT)
+@limiter.limit(lambda: upload_rate_limit_string())
 def fileupload():
     with upload_slot() as acquired:
         if not acquired:
@@ -1836,7 +1962,7 @@ def fileupload():
 
 
 @app.route("/download/<file_id>")
-@limiter.limit(DOWNLOAD_RATE_LIMIT)
+@limiter.limit(lambda: download_rate_limit_string())
 def download(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -1871,7 +1997,7 @@ def download(file_id: str):
 
 
 @app.route("/files/<file_id>/<path:filename>")
-@limiter.limit(DOWNLOAD_RATE_LIMIT)
+@limiter.limit(lambda: download_rate_limit_string())
 def direct_download(file_id: str, filename: str):
     record = get_file(file_id)
     if not record:
@@ -1916,7 +2042,7 @@ def direct_download(file_id: str, filename: str):
 @csrf.exempt
 @app.route("/2.0/files/content", methods=["POST"])
 @require_api_auth("box")
-@limiter.limit(UPLOAD_RATE_LIMIT)
+@limiter.limit(lambda: upload_rate_limit_string())
 def box_upload_files():
     with upload_slot() as acquired:
         if not acquired:
@@ -2178,7 +2304,7 @@ def box_upload_files():
 
 @app.route("/2.0/files/<file_id>/content", methods=["GET"])
 @require_api_auth("box")
-@limiter.limit(DOWNLOAD_RATE_LIMIT)
+@limiter.limit(lambda: download_rate_limit_string())
 def box_download_file(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -2254,7 +2380,7 @@ def box_file_request(file_id: str):
 
 
 @app.route("/<path:direct_path>")
-@limiter.limit(DOWNLOAD_RATE_LIMIT)
+@limiter.limit(lambda: download_rate_limit_string())
 def serve_raw_file(direct_path: str):
     normalized = direct_path.strip("/")
     if not normalized:
@@ -2324,7 +2450,7 @@ def serve_raw_file(direct_path: str):
 @csrf.exempt
 @app.route("/s3/<bucket>", methods=["POST"])
 @require_api_auth("s3")
-@limiter.limit(UPLOAD_RATE_LIMIT)
+@limiter.limit(lambda: upload_rate_limit_string())
 def s3_multipart_upload(bucket: str):
     with upload_slot() as acquired:
         if not acquired:
@@ -2560,7 +2686,7 @@ def s3_multipart_upload(bucket: str):
 @csrf.exempt
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
 @require_api_auth("s3")
-@limiter.limit(UPLOAD_RATE_LIMIT)
+@limiter.limit(lambda: upload_rate_limit_string())
 def s3_put_object(bucket: str, key: str):
     with upload_slot() as acquired:
         if not acquired:

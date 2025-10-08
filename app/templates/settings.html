@@ -128,32 +128,100 @@
   </section>
   <section class="card">
     <h2>Performance Settings</h2>
-    <table class="settings-table">
-      <tbody>
-        <tr>
-          <th scope="row">Max concurrent uploads</th>
-          <td>{{ performance_settings.max_concurrent_uploads }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Cleanup interval (minutes)</th>
-          <td>{{ performance_settings.cleanup_interval_minutes }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Upload requests per hour</th>
-          <td>{{ performance_settings.rate_limits.upload_per_hour }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Login attempts per minute</th>
-          <td>{{ performance_settings.rate_limits.login_per_minute }}</td>
-        </tr>
-        <tr>
-          <th scope="row">Download requests per minute</th>
-          <td>{{ performance_settings.rate_limits.download_per_minute }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <form method="post" class="performance-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_performance" />
+      <table class="settings-table">
+        <tbody>
+          <tr>
+            <th scope="row">
+              <label for="max_concurrent_uploads">Max concurrent uploads</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="max_concurrent_uploads"
+                name="max_concurrent_uploads"
+                min="1"
+                step="1"
+                value="{{ performance_settings.max_concurrent_uploads }}"
+                required
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="cleanup_interval_minutes">Cleanup interval (minutes)</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="cleanup_interval_minutes"
+                name="cleanup_interval_minutes"
+                min="1"
+                step="1"
+                value="{{ performance_settings.cleanup_interval_minutes }}"
+                required
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="upload_rate_limit_per_hour">Upload requests per hour</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="upload_rate_limit_per_hour"
+                name="upload_rate_limit_per_hour"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.upload_per_hour }}"
+                required
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="login_rate_limit_per_minute">Login attempts per minute</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="login_rate_limit_per_minute"
+                name="login_rate_limit_per_minute"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.login_per_minute }}"
+                required
+              />
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">
+              <label for="download_rate_limit_per_minute">Download requests per minute</label>
+            </th>
+            <td>
+              <input
+                type="number"
+                id="download_rate_limit_per_minute"
+                name="download_rate_limit_per_minute"
+                min="1"
+                step="1"
+                value="{{ performance_settings.rate_limits.download_per_minute }}"
+                required
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="form-actions">
+        <button type="submit" class="button primary">Save</button>
+      </div>
+    </form>
     <p class="form-help">
-      These limits are currently controlled via environment variables and apply immediately when the service starts.
+      These limits update immediately after saving. The scheduler interval applies to background cleanup jobs and may take up to
+      one full interval to reflect the new cadence.
     </p>
   </section>
   <section class="card">

@@ -36,6 +36,21 @@ def _default_password_hash() -> str:
 
 
 DEFAULT_MAX_UPLOAD_MB = max(1, int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500")))
+DEFAULT_MAX_CONCURRENT_UPLOADS = max(
+    1, int(os.environ.get("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", "10"))
+)
+DEFAULT_CLEANUP_INTERVAL_MINUTES = max(
+    1, int(os.environ.get("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", "5"))
+)
+DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR = max(
+    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", "100"))
+)
+DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = max(
+    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", "10"))
+)
+DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE = max(
+    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", "120"))
+)
 
 
 DEFAULT_CONFIG = {
@@ -43,6 +58,11 @@ DEFAULT_CONFIG = {
     "retention_min_hours": 0.0,
     "retention_max_hours": 168.0,
     "max_upload_size_mb": float(DEFAULT_MAX_UPLOAD_MB),
+    "max_concurrent_uploads": float(DEFAULT_MAX_CONCURRENT_UPLOADS),
+    "cleanup_interval_minutes": float(DEFAULT_CLEANUP_INTERVAL_MINUTES),
+    "upload_rate_limit_per_hour": float(DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR),
+    "login_rate_limit_per_minute": float(DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE),
+    "download_rate_limit_per_minute": float(DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE),
     "ui_auth_enabled": False,
     "ui_username": "admin",
     "ui_password_hash": _default_password_hash(),
@@ -56,6 +76,11 @@ CONFIG_NUMERIC_KEYS = {
     "retention_min_hours",
     "retention_max_hours",
     "max_upload_size_mb",
+    "max_concurrent_uploads",
+    "cleanup_interval_minutes",
+    "upload_rate_limit_per_hour",
+    "login_rate_limit_per_minute",
+    "download_rate_limit_per_minute",
 }
 
 CONFIG_BOOLEAN_KEYS = {"ui_auth_enabled", "api_auth_enabled"}
@@ -95,6 +120,27 @@ def _normalize_config(raw_config: Dict[str, float]) -> Dict[str, float]:
 
     if config.get("max_upload_size_mb", 0) < 1:
         config["max_upload_size_mb"] = float(DEFAULT_MAX_UPLOAD_MB)
+
+    if config.get("max_concurrent_uploads", 0) < 1:
+        config["max_concurrent_uploads"] = float(DEFAULT_MAX_CONCURRENT_UPLOADS)
+
+    if config.get("cleanup_interval_minutes", 0) < 1:
+        config["cleanup_interval_minutes"] = float(DEFAULT_CLEANUP_INTERVAL_MINUTES)
+
+    if config.get("upload_rate_limit_per_hour", 0) < 1:
+        config["upload_rate_limit_per_hour"] = float(
+            DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR
+        )
+
+    if config.get("login_rate_limit_per_minute", 0) < 1:
+        config["login_rate_limit_per_minute"] = float(
+            DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE
+        )
+
+    if config.get("download_rate_limit_per_minute", 0) < 1:
+        config["download_rate_limit_per_minute"] = float(
+            DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE
+        )
 
     for key in CONFIG_BOOLEAN_KEYS:
         if key in raw_config:

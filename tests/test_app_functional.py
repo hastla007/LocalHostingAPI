@@ -41,11 +41,14 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         for module in ["app.app", "app.storage", "app"]:
             if module in sys.modules:
                 del sys.modules[module]
-        from app import app  # noqa: WPS433 (import required during reload)
-        import app.storage as storage  # noqa: WPS433
+        import importlib
 
-        self.app = app
+        app_module = importlib.import_module("app.app")  # noqa: WPS433
+        storage = importlib.import_module("app.storage")  # noqa: WPS433
+
+        self.app = app_module.app
         self.storage = storage
+        self.app_module = app_module
 
     def test_upload_and_download_flow(self):
         response = self.client.post(
@@ -226,6 +229,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn(b"Maximum upload size", response.data)
         self.assertIn(b"Storage Management", response.data)
         self.assertIn(b"Performance Settings", response.data)
+        self.assertIn(b"name=\"max_concurrent_uploads\"", response.data)
         self.assertIn(b"File Management Policies", response.data)
 
     def test_settings_cleanup_actions(self):
@@ -244,6 +248,44 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Orphaned file cleanup complete", response.data)
+
+    def test_update_performance_settings(self):
+        response = self.client.post(
+            "/settings",
+            data={
+                "action": "update_performance",
+                "max_concurrent_uploads": "7",
+                "cleanup_interval_minutes": "9",
+                "upload_rate_limit_per_hour": "75",
+                "login_rate_limit_per_minute": "6",
+                "download_rate_limit_per_minute": "80",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Performance settings updated", response.data)
+
+        config = self.app_module.get_config()
+        self.assertEqual(config["max_concurrent_uploads"], 7.0)
+        self.assertEqual(config["cleanup_interval_minutes"], 9.0)
+        self.assertEqual(config["upload_rate_limit_per_hour"], 75.0)
+        self.assertEqual(config["login_rate_limit_per_minute"], 6.0)
+        self.assertEqual(config["download_rate_limit_per_minute"], 80.0)
+
+        self.assertEqual(self.app_module.max_concurrent_uploads_setting, 7)
+        acquired = [
+            self.app_module.upload_semaphore.acquire(blocking=False)
+            for _ in range(7)
+        ]
+        self.assertTrue(all(acquired))
+        self.assertFalse(self.app_module.upload_semaphore.acquire(blocking=False))
+        for _ in acquired:
+            self.app_module.upload_semaphore.release()
+
+        self.assertEqual(self.app_module.cleanup_interval_minutes_setting, 9)
+        self.assertEqual(self.app_module.upload_rate_limit_string(), "75 per hour")
+        self.assertEqual(self.app_module.login_rate_limit_string(), "6 per minute")
+        self.assertEqual(self.app_module.download_rate_limit_string(), "80 per minute")
 
     def test_api_keys_page_renders(self):
         response = self.client.get("/apikeys")
