@@ -143,6 +143,7 @@ from .storage import (
     get_db,
     get_file,
     get_file_by_direct_path,
+    get_storage_statistics,
     get_storage_path,
     iter_files,
     list_files,
@@ -548,9 +549,52 @@ def get_ui_api_key(config: Optional[Dict[str, Any]] = None) -> Optional[dict]:
 def render_settings_page(config: Dict[str, Any]):
     """Render the general settings dashboard."""
 
+    storage_stats_raw = get_storage_statistics()
+    storage_overview = {
+        "total_bytes": storage_stats_raw["total_bytes"],
+        "total_gb": storage_stats_raw["total_bytes"] / (1024 ** 3)
+        if storage_stats_raw["total_bytes"]
+        else 0.0,
+        "active_count": storage_stats_raw["active_count"],
+        "expired_count": storage_stats_raw["expired_count"],
+    }
+
+    storage_quota_limit = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
+
+    performance_settings = {
+        "max_concurrent_uploads": max_concurrent_uploads,
+        "cleanup_interval_minutes": cleanup_interval,
+        "rate_limits": {
+            "upload_per_hour": UPLOAD_RATE_LIMIT_COUNT,
+            "login_per_minute": LOGIN_RATE_LIMIT_COUNT,
+            "download_per_minute": DOWNLOAD_RATE_LIMIT_COUNT,
+        },
+    }
+
+    blocked_extensions_raw = os.environ.get("LOCALHOSTING_BLOCKED_EXTENSIONS", "")
+    blocked_extensions = [
+        item.strip()
+        for item in blocked_extensions_raw.split(",")
+        if item.strip()
+    ]
+
+    file_policy_settings = {
+        "blocked_extensions": blocked_extensions,
+        "max_filename_length": _get_optional_int_env(
+            "LOCALHOSTING_MAX_FILENAME_LENGTH"
+        ),
+        "sharding_enabled": _get_optional_bool_env("LOCALHOSTING_ENABLE_SHARDING"),
+        "raw_urls_enabled": _get_optional_bool_env("LOCALHOSTING_ENABLE_RAW_URLS"),
+        "blocked_extensions_raw": blocked_extensions_raw,
+    }
+
     return render_template(
         "settings.html",
         config=config,
+        storage_overview=storage_overview,
+        storage_quota_limit=storage_quota_limit,
+        performance_settings=performance_settings,
+        file_policy_settings=file_policy_settings,
     )
 
 
@@ -685,6 +729,64 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"],
     storage_uri=os.environ.get("LOCALHOSTING_RATE_LIMIT_STORAGE", "memory://"),
 )
+
+
+def _get_positive_int_env(env_key: str, default: int) -> int:
+    raw_value = os.environ.get(env_key)
+    if raw_value is None:
+        return max(1, default)
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return max(1, default)
+    return max(1, parsed)
+
+
+def _get_optional_float_env(env_key: str) -> Optional[float]:
+    raw_value = os.environ.get(env_key)
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        return float(raw_value)
+    except ValueError:
+        return None
+
+
+def _get_optional_int_env(env_key: str) -> Optional[int]:
+    raw_value = os.environ.get(env_key)
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        return int(raw_value)
+    except ValueError:
+        return None
+
+
+def _get_optional_bool_env(env_key: str) -> Optional[bool]:
+    raw_value = os.environ.get(env_key)
+    if raw_value is None:
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+UPLOAD_RATE_LIMIT_COUNT = _get_positive_int_env(
+    "LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", 100
+)
+LOGIN_RATE_LIMIT_COUNT = _get_positive_int_env(
+    "LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", 10
+)
+DOWNLOAD_RATE_LIMIT_COUNT = _get_positive_int_env(
+    "LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", 120
+)
+
+UPLOAD_RATE_LIMIT = f"{UPLOAD_RATE_LIMIT_COUNT} per hour"
+LOGIN_RATE_LIMIT = f"{LOGIN_RATE_LIMIT_COUNT} per minute"
+DOWNLOAD_RATE_LIMIT = f"{DOWNLOAD_RATE_LIMIT_COUNT} per minute"
 
 try:
     max_upload_size_mb = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500"))
@@ -1331,6 +1433,22 @@ def settings():
             )
             flash("UI authentication settings updated.", "success")
 
+        elif action == "cleanup_expired_now":
+            removed = cleanup_expired_files()
+            lifecycle_logger.info("cleanup_expired_manual removed=%d", removed)
+            flash(
+                f"Expired file cleanup complete. Removed {removed} entr{'y' if removed == 1 else 'ies'}.",
+                "success" if removed else "info",
+            )
+
+        elif action == "cleanup_orphaned_now":
+            removed = cleanup_orphaned_files()
+            lifecycle_logger.info("cleanup_orphaned_manual removed=%d", removed)
+            flash(
+                f"Orphaned file cleanup complete. Removed {removed} item{'s' if removed != 1 else ''}.",
+                "success" if removed else "info",
+            )
+
         else:
             flash("Unsupported settings action.", "error")
 
@@ -1450,7 +1568,7 @@ def api_keys():
 
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("10 per minute")
+@limiter.limit(LOGIN_RATE_LIMIT)
 def login():
     config = get_config()
     if not config.get("ui_auth_enabled"):
@@ -1497,7 +1615,7 @@ def logout():
 @csrf.exempt
 @app.route("/fileupload", methods=["POST"])
 @require_api_auth()
-@limiter.limit("100 per hour")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def fileupload():
     with upload_slot() as acquired:
         if not acquired:
@@ -1718,6 +1836,7 @@ def fileupload():
 
 
 @app.route("/download/<file_id>")
+@limiter.limit(DOWNLOAD_RATE_LIMIT)
 def download(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -1752,6 +1871,7 @@ def download(file_id: str):
 
 
 @app.route("/files/<file_id>/<path:filename>")
+@limiter.limit(DOWNLOAD_RATE_LIMIT)
 def direct_download(file_id: str, filename: str):
     record = get_file(file_id)
     if not record:
@@ -1796,7 +1916,7 @@ def direct_download(file_id: str, filename: str):
 @csrf.exempt
 @app.route("/2.0/files/content", methods=["POST"])
 @require_api_auth("box")
-@limiter.limit("100 per hour")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def box_upload_files():
     with upload_slot() as acquired:
         if not acquired:
@@ -2058,6 +2178,7 @@ def box_upload_files():
 
 @app.route("/2.0/files/<file_id>/content", methods=["GET"])
 @require_api_auth("box")
+@limiter.limit(DOWNLOAD_RATE_LIMIT)
 def box_download_file(file_id: str):
     record = get_file(file_id)
     if not record:
@@ -2133,6 +2254,7 @@ def box_file_request(file_id: str):
 
 
 @app.route("/<path:direct_path>")
+@limiter.limit(DOWNLOAD_RATE_LIMIT)
 def serve_raw_file(direct_path: str):
     normalized = direct_path.strip("/")
     if not normalized:
@@ -2202,7 +2324,7 @@ def serve_raw_file(direct_path: str):
 @csrf.exempt
 @app.route("/s3/<bucket>", methods=["POST"])
 @require_api_auth("s3")
-@limiter.limit("100 per hour")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def s3_multipart_upload(bucket: str):
     with upload_slot() as acquired:
         if not acquired:
@@ -2438,7 +2560,7 @@ def s3_multipart_upload(bucket: str):
 @csrf.exempt
 @app.route("/s3/<bucket>/<path:key>", methods=["PUT"])
 @require_api_auth("s3")
-@limiter.limit("100 per hour")
+@limiter.limit(UPLOAD_RATE_LIMIT)
 def s3_put_object(bucket: str, key: str):
     with upload_slot() as acquired:
         if not acquired:

@@ -556,6 +556,54 @@ def cleanup_orphaned_files() -> int:
     return removed
 
 
+def get_storage_statistics() -> Dict[str, int]:
+    """Return aggregate metrics about stored files."""
+
+    now = time.time()
+    with get_db() as conn:
+        active_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS count,
+                COALESCE(SUM(size), 0) AS total_size
+            FROM files
+            WHERE expires_at >= ?
+            """,
+            (now,),
+        ).fetchone()
+
+        expired_row = conn.execute(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS total_size FROM files WHERE expires_at < ?",
+            (now,),
+        ).fetchone()
+
+        total_row = conn.execute(
+            "SELECT COALESCE(SUM(size), 0) AS total_size FROM files"
+        ).fetchone()
+
+    active_count = int(active_row["count"] if active_row and active_row["count"] is not None else 0)
+    active_bytes = int(
+        active_row["total_size"] if active_row and active_row["total_size"] is not None else 0
+    )
+    expired_count = int(
+        expired_row["count"] if expired_row and expired_row["count"] is not None else 0
+    )
+    expired_bytes = int(
+        expired_row["total_size"] if expired_row and expired_row["total_size"] is not None else 0
+    )
+    total_bytes = int(
+        total_row["total_size"] if total_row and total_row["total_size"] is not None else 0
+    )
+
+    return {
+        "active_count": active_count,
+        "active_bytes": active_bytes,
+        "expired_count": expired_count,
+        "expired_bytes": expired_bytes,
+        "total_bytes": total_bytes,
+    }
+
+
 def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
     for row in records:
         remaining_seconds = max(row["expires_at"] - time.time(), 0)

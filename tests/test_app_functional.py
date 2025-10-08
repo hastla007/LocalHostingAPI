@@ -224,6 +224,26 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Retention Settings", response.data)
         self.assertIn(b"Maximum upload size", response.data)
+        self.assertIn(b"Storage Management", response.data)
+        self.assertIn(b"Performance Settings", response.data)
+        self.assertIn(b"File Management Policies", response.data)
+
+    def test_settings_cleanup_actions(self):
+        response = self.client.post(
+            "/settings",
+            data={"action": "cleanup_expired_now"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Expired file cleanup complete", response.data)
+
+        response = self.client.post(
+            "/settings",
+            data={"action": "cleanup_orphaned_now"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Orphaned file cleanup complete", response.data)
 
     def test_api_keys_page_renders(self):
         response = self.client.get("/apikeys")

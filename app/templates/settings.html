@@ -82,6 +82,136 @@
     </p>
   </section>
   <section class="card">
+    <h2>Storage Management</h2>
+    <table class="settings-table">
+      <tbody>
+        <tr>
+          <th scope="row">Total storage used</th>
+          <td>{{ '%.3f'|format(storage_overview.total_gb) }} GB</td>
+        </tr>
+        <tr>
+          <th scope="row">Active files</th>
+          <td>{{ storage_overview.active_count }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Expired files pending cleanup</th>
+          <td>{{ storage_overview.expired_count }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Storage quota limit</th>
+          <td>
+            {% if storage_quota_limit is not none %}
+              {{ '%.2f'|format(storage_quota_limit) }} GB
+            {% else %}
+              <span class="text-muted">Not configured</span>
+            {% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="settings-action-row">
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="action" value="cleanup_expired_now" />
+        <button type="submit" class="button primary">Cleanup Expired Files Now</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="action" value="cleanup_orphaned_now" />
+        <button type="submit" class="button secondary">Remove Orphaned Files</button>
+      </form>
+    </div>
+    <p class="form-help">
+      Values reflect the current environment configuration. Future releases will allow adjusting these storage controls directly
+      within the dashboard.
+    </p>
+  </section>
+  <section class="card">
+    <h2>Performance Settings</h2>
+    <table class="settings-table">
+      <tbody>
+        <tr>
+          <th scope="row">Max concurrent uploads</th>
+          <td>{{ performance_settings.max_concurrent_uploads }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Cleanup interval (minutes)</th>
+          <td>{{ performance_settings.cleanup_interval_minutes }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Upload requests per hour</th>
+          <td>{{ performance_settings.rate_limits.upload_per_hour }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Login attempts per minute</th>
+          <td>{{ performance_settings.rate_limits.login_per_minute }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Download requests per minute</th>
+          <td>{{ performance_settings.rate_limits.download_per_minute }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="form-help">
+      These limits are currently controlled via environment variables and apply immediately when the service starts.
+    </p>
+  </section>
+  <section class="card">
+    <h2>File Management Policies</h2>
+    <table class="settings-table">
+      <tbody>
+        <tr>
+          <th scope="row">Blocked file extensions</th>
+          <td>
+            {% if file_policy_settings.blocked_extensions %}
+              {{ file_policy_settings.blocked_extensions | join(', ') }}
+            {% else %}
+              <span class="text-muted">None configured</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Maximum filename length</th>
+          <td>
+            {% if file_policy_settings.max_filename_length is not none %}
+              {{ file_policy_settings.max_filename_length }} characters
+            {% else %}
+              <span class="text-muted">Not configured</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Directory sharding</th>
+          <td>
+            {% if file_policy_settings.sharding_enabled is none %}
+              <span class="text-muted">Not configured (defaults apply)</span>
+            {% elif file_policy_settings.sharding_enabled %}
+              Enabled via environment
+            {% else %}
+              Disabled via environment
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Raw download URLs</th>
+          <td>
+            {% if file_policy_settings.raw_urls_enabled is none %}
+              <span class="text-muted">Not configured (defaults apply)</span>
+            {% elif file_policy_settings.raw_urls_enabled %}
+              Enabled via environment
+            {% else %}
+              Disabled via environment
+            {% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="form-help">
+      These policies are read from environment variables today. Capturing them here keeps operators informed until the values
+      can be edited directly through the dashboard.
+    </p>
+  </section>
+  <section class="card">
     <h2>UI Authentication</h2>
     <form method="post" class="form-grid auth-grid">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
