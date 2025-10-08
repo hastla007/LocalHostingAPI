@@ -544,7 +544,9 @@ def register_file(
                     fallback_candidate,
                 )
                 break
-            time.sleep(0.05 * (attempt + 1))
+            # Exponential backoff to avoid hammering the unique constraint when
+            # concurrent uploads contend for the same direct path.
+            time.sleep(0.05 * (attempt + 1) ** 2)
         except Exception:
             raise
 

@@ -1260,6 +1260,23 @@ _base_lifecycle_logger = logging.getLogger("localhosting.lifecycle")
 _base_lifecycle_logger.setLevel(numeric_level)
 lifecycle_logger = RequestAwareLogger(_base_lifecycle_logger)
 
+
+def _close_stream_safely(stream: Any, context: str) -> None:
+    """Close an upload/input stream while logging failures."""
+
+    if stream is None or not hasattr(stream, "close"):
+        return
+
+    try:
+        stream.close()
+    except OSError as error:
+        lifecycle_logger.warning(
+            "stream_close_failed context=%s error=%s",
+            context,
+            sanitize_log_value(str(error)),
+        )
+
+
 if not HAS_FLASK_WTF:
 
     @app.context_processor
@@ -2344,11 +2361,10 @@ def fileupload():
                             destination.write(chunk)
                             written += len(chunk)
                 finally:
-                    if hasattr(upload.stream, "close"):
-                        try:
-                            upload.stream.close()
-                        except OSError:
-                            pass
+                    _close_stream_safely(
+                        getattr(upload, "stream", None),
+                        f"fileupload file_id={file_id}",
+                    )
 
                 if too_large:
                     if temp_path and temp_path.exists():
@@ -2400,11 +2416,10 @@ def fileupload():
                     file_id,
                     sanitize_log_value(filename),
                 )
-                if hasattr(upload, "stream") and hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
+                _close_stream_safely(
+                    getattr(upload, "stream", None),
+                    f"fileupload-exception file_id={file_id}",
+                )
                 if temp_path and temp_path.exists():
                     temp_path.unlink(missing_ok=True)
                 if upload_path and upload_path.exists():
@@ -2777,11 +2792,10 @@ def box_upload_files():
                                 else None,
                             )
                 finally:
-                    if hasattr(upload.stream, "close"):
-                        try:
-                            upload.stream.close()
-                        except OSError:
-                            pass
+                    _close_stream_safely(
+                        getattr(upload, "stream", None),
+                        f"box-upload file_id={file_id}",
+                    )
 
                 file_id = register_file(
                     original_name=filename,
@@ -2797,11 +2811,10 @@ def box_upload_files():
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
                     prune_empty_upload_dirs(upload_path.parent)
-                if hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
+                _close_stream_safely(
+                    getattr(upload, "stream", None),
+                    f"box-upload-too-large file_id={file_id}",
+                )
                 failed_rollbacks = rollback_successful_uploads(successful_file_ids)
                 if failed_rollbacks:
                     lifecycle_logger.error(
@@ -2824,11 +2837,10 @@ def box_upload_files():
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
                     prune_empty_upload_dirs(upload_path.parent)
-                if hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
+                _close_stream_safely(
+                    getattr(upload, "stream", None),
+                    f"box-upload-exception file_id={file_id}",
+                )
                 failed_rollbacks = rollback_successful_uploads(successful_file_ids)
                 if failed_rollbacks:
                     lifecycle_logger.error(
@@ -3252,11 +3264,10 @@ def s3_multipart_upload(bucket: str):
                         if max_bytes and written > max_bytes:
                             raise ValueError("file too large")
             finally:
-                if hasattr(upload.stream, "close"):
-                    try:
-                        upload.stream.close()
-                    except OSError:
-                        pass
+                _close_stream_safely(
+                    getattr(upload, "stream", None),
+                    f"s3-post file_id={file_id}",
+                )
 
             temp_path.replace(upload_path)
             size = written if written else upload_path.stat().st_size
@@ -3499,11 +3510,7 @@ def s3_put_object(bucket: str, key: str):
                         if max_bytes and written > max_bytes:
                             raise ValueError("file too large")
             finally:
-                if hasattr(stream, "close"):
-                    try:
-                        stream.close()
-                    except OSError:
-                        pass
+                _close_stream_safely(stream, f"s3-put file_id={file_id}")
 
             temp_path.replace(upload_path)
             size = written if written else upload_path.stat().st_size
