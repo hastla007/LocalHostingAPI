@@ -2283,73 +2283,10 @@ def fileupload():
             current_usage = stats.get("total_bytes", 0)
             if current_usage >= quota_limit_bytes:
                 lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s",
-                    bucket,
-                    sanitize_log_value(key),
+                    "upload_quota_exceeded usage=%d limit=%d",
+                    current_usage,
+                    quota_limit_bytes,
                 )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=key,
-                    status_code=507,
-                )
-        quota_limit_bytes = storage_quota_limit_bytes()
-        current_usage = None
-        if quota_limit_bytes is not None:
-            stats = get_storage_statistics()
-            current_usage = stats.get("total_bytes", 0)
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s",
-                    bucket,
-                    sanitize_log_value(request.form.get("key") or request.form.get("Key") or upload.filename or ""),
-                )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=request.form.get("key") or request.form.get("Key") or upload.filename,
-                    status_code=507,
-                )
-        quota_limit_bytes = storage_quota_limit_bytes()
-        current_usage = None
-        if quota_limit_bytes is not None:
-            stats = get_storage_statistics()
-            current_usage = stats.get("total_bytes", 0)
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s", bucket, sanitize_log_value(key)
-                )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=key,
-                    status_code=507,
-                )
-        quota_limit_bytes = storage_quota_limit_bytes()
-        current_usage = None
-        if quota_limit_bytes is not None:
-            stats = get_storage_statistics()
-            current_usage = stats.get("total_bytes", 0)
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s", bucket, sanitize_log_value(key)
-                )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=key,
-                    status_code=507,
-                )
-        quota_limit_bytes = storage_quota_limit_bytes()
-        current_usage = None
-        if quota_limit_bytes is not None:
-            stats = get_storage_statistics()
-            current_usage = stats.get("total_bytes", 0)
-            if current_usage >= quota_limit_bytes:
                 return jsonify({"error": "Storage quota exceeded"}), 507
         payload = request.get_json(silent=True) if request.is_json else None
         try:
@@ -3322,26 +3259,6 @@ def s3_multipart_upload(bucket: str):
             size = written if written else upload_path.stat().st_size
             if max_bytes and size > max_bytes:
                 raise ValueError("file too large")
-            if quota_limit_bytes is not None:
-                if current_usage is None:
-                    stats = get_storage_statistics()
-                    current_usage = stats.get("total_bytes", 0)
-                if current_usage + size > quota_limit_bytes:
-                    if upload_path.exists():
-                        upload_path.unlink(missing_ok=True)
-                        prune_empty_upload_dirs(upload_path.parent)
-                    lifecycle_logger.warning(
-                        "s3_upload_quota_exceeded bucket=%s key=%s",
-                        bucket,
-                        sanitize_log_value(key),
-                    )
-                    return _s3_error_response(
-                        "InsufficientStorage",
-                        "Storage quota exceeded.",
-                        bucket=bucket,
-                        key=key,
-                        status_code=507,
-                    )
             if quota_limit_bytes is not None:
                 if current_usage is None:
                     stats = get_storage_statistics()
