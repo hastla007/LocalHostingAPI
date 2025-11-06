@@ -379,6 +379,16 @@ def migrate_permanent_storage():
         conn.commit()
 
 
+def migrate_permanent_storage():
+    """Add permanent column to files table if it doesn't exist."""
+    with get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+        if "permanent" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
+            conn.commit()
+            logger.info("Added permanent column to files table")
+
+
 def _direct_path_in_use(conn: sqlite3.Connection, direct_path: str) -> bool:
     if not direct_path:
         return True
