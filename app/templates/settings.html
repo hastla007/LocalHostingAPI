@@ -153,7 +153,7 @@
   <section class="card">
     <h2>Performance Settings</h2>
     <form method="post" action="{{ url_for('settings') }}" class="performance-form" id="performance-form">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" id="csrf-token" />
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_performance" />
       <table class="settings-table">
         <tbody>
@@ -169,7 +169,7 @@
                 min="1"
                 max="10000"
                 step="any"
-                value="{{ performance_settings.max_upload_size_mb }}"
+                value="{{ '%.1f'|format(performance_settings.max_upload_size_mb) }}"
                 required
                 class="performance-input"
               />
@@ -301,30 +301,26 @@
 
 {% block scripts %}
   <script>
-    // Performance form submission
+    // Performance form submission - NO INTERFERENCE, just logging
     (function() {
       const form = document.getElementById('performance-form');
-      const saveBtn = document.getElementById('save-performance-btn');
-
+      
       if (!form) {
         console.error('Performance form not found');
         return;
       }
 
-      console.log('Performance form found');
-      console.log('Form action:', form.getAttribute('action'));
-      console.log('Form method:', form.getAttribute('method'));
-
+      console.log('Performance form initialized');
+      console.log('Form will submit to:', form.getAttribute('action'));
+      console.log('Current max_upload_size_mb value:', document.getElementById('max_upload_size_mb').value);
+      
+      // Just log when form submits - don't interfere
       form.addEventListener('submit', function(e) {
-        console.log('Form submitted');
-        
-        // Let the form submit naturally - browser will handle it
-        // Just show loading state
-        if (saveBtn) {
-          saveBtn.disabled = true;
-          saveBtn.textContent = 'Saving...';
-          saveBtn.style.opacity = '0.6';
-        }
+        console.log('Performance form submitting...');
+        console.log('max_upload_size_mb:', document.getElementById('max_upload_size_mb').value);
+        console.log('max_concurrent_uploads:', document.getElementById('max_concurrent_uploads').value);
+        console.log('action field:', document.querySelector('input[name="action"]').value);
+        // Form will submit naturally - we're just logging
       });
     })();
   </script>

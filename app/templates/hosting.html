@@ -170,58 +170,33 @@
 
 {% block scripts %}
   <script>
-    // Global delete confirmation function
+    // Global delete confirmation function - FIXED VERSION
     function confirmDelete(form, event) {
-      event.preventDefault();
-      event.stopPropagation();
-      
       const filename = form.getAttribute('data-filename') || 'this file';
-      const action = form.getAttribute('action');
-      
-      console.log('Delete requested for:', filename);
-      console.log('Form action:', action);
-      console.log('Form method:', form.getAttribute('method'));
-      
       const confirmMsg = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
       
-      if (window.confirm(confirmMsg)) {
-        console.log('User confirmed - submitting form');
-        
-        // Show loading state on button
-        const button = form.querySelector('button[type="submit"]');
-        if (button) {
-          const icon = button.querySelector('.icon');
-          if (icon) {
-            icon.textContent = '⏳';
-          }
-          button.disabled = true;
-          button.style.opacity = '0.5';
-        }
-        
-        // Submit the form
-        try {
-          form.submit();
-          console.log('Form submitted successfully');
-          return true;
-        } catch (err) {
-          console.error('Error submitting form:', err);
-          alert('Error: ' + err.message);
-          
-          // Restore button
-          if (button) {
-            const icon = button.querySelector('.icon');
-            if (icon) {
-              icon.textContent = '🗑️';
-            }
-            button.disabled = false;
-            button.style.opacity = '1';
-          }
-          return false;
-        }
-      } else {
+      if (!window.confirm(confirmMsg)) {
+        // User cancelled - prevent submission
+        event.preventDefault();
         console.log('User cancelled delete');
         return false;
       }
+      
+      // User confirmed - show loading state and allow form to submit naturally
+      console.log('User confirmed delete for:', filename);
+      
+      const button = form.querySelector('button[type="submit"]');
+      if (button) {
+        const icon = button.querySelector('.icon');
+        if (icon) {
+          icon.textContent = '⏳';
+        }
+        button.disabled = true;
+        button.style.opacity = '0.5';
+      }
+      
+      // Allow form to submit naturally
+      return true;
     }
     
     // Make it available globally
