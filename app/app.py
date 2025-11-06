@@ -1231,7 +1231,11 @@ app.config["MAX_CONTENT_LENGTH"] = int(
 )
 app.config["MAX_UPLOAD_SIZE_MB"] = _CONFIG_CACHE.get("max_upload_size_mb", 500)
 app.config["SECRET_KEY"] = get_secret_key_value()
-app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
+_session_cookie_secure_override = _get_optional_bool_env("SESSION_COOKIE_SECURE")
+if _session_cookie_secure_override is None:
+    app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
+else:
+    app.config["SESSION_COOKIE_SECURE"] = _session_cookie_secure_override
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=1)
