@@ -1872,7 +1872,7 @@ def settings():
                 )
                 return render_settings_page(proposed)
             save_config(proposed)
-            get_config(refresh=True)
+            config = get_config(refresh=True)
             refreshed = True
             lifecycle_logger.info(
                 "settings_updated retention_min=%.2f retention_max=%.2f retention_default=%.2f",
@@ -1958,7 +1958,7 @@ def settings():
             )
 
             save_config(proposed)
-            get_config(refresh=True)
+            config = get_config(refresh=True)
             refreshed = True
 
             flash("Performance settings updated successfully.", "success")

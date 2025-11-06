@@ -290,6 +290,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             follow_redirects=True,
         )
         self.assertEqual(performance_response.status_code, 200)
+        self.assertIn(b'name="max_upload_size_mb"', performance_response.data)
+        self.assertIn(b'value="256.0"', performance_response.data)
 
         config = self.storage.load_config()
         self.assertEqual(config["retention_min_hours"], 1.0)
