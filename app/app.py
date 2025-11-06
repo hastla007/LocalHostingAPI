@@ -2316,27 +2316,46 @@ def fileupload():
                 )
                 return jsonify({"error": "Storage quota exceeded"}), 507
         payload = request.get_json(silent=True) if request.is_json else None
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.form.get("retention_hours"),
-                request.args.get("retention_hours"),
-                (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
-            )
-        except RetentionValidationError as error:
-            allowed_range = error.allowed_range or [
-                config["retention_min_hours"],
-                config["retention_max_hours"],
-            ]
-            app.logger.warning(
-                "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
-                request.form.get("retention_hours")
-                or request.args.get("retention_hours")
-                or (payload or {}).get("retention_hours"),
-                allowed_range[0],
-                allowed_range[1],
-            )
-            return jsonify(error.to_payload()), 400
+
+        permanent = False
+        permanent_candidates = [
+            request.form.get("permanent"),
+            request.args.get("permanent"),
+            (payload or {}).get("permanent") if isinstance(payload, dict) else None,
+        ]
+        for candidate in permanent_candidates:
+            if candidate is None:
+                continue
+            if isinstance(candidate, str):
+                permanent = candidate.lower() in {"1", "true", "yes", "on"}
+            else:
+                permanent = bool(candidate)
+            break
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.form.get("retention_hours"),
+                    request.args.get("retention_hours"),
+                    (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
+                )
+            except RetentionValidationError as error:
+                allowed_range = error.allowed_range or [
+                    config["retention_min_hours"],
+                    config["retention_max_hours"],
+                ]
+                app.logger.warning(
+                    "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
+                    request.form.get("retention_hours")
+                    or request.args.get("retention_hours")
+                    or (payload or {}).get("retention_hours"),
+                    allowed_range[0],
+                    allowed_range[1],
+                )
+                return jsonify(error.to_payload()), 400
+        else:
+            retention_hours = 0
 
         results = []
         failures: List[Dict[str, str]] = []
@@ -2394,6 +2413,7 @@ def fileupload():
                                 size=size,
                                 retention_hours=retention_hours,
                                 file_id=file_id,
+                                permanent=permanent,
                             )
                     except StorageQuotaExceededError as quota_error:
                         if upload_path.exists():
@@ -2478,10 +2498,13 @@ def fileupload():
                     "filename": filename,
                     "size": size,
                     "download_url": download_url,
-                    "retention_hours": retention_hours,
+                    "retention_hours": retention_hours if not permanent else None,
+                    "permanent": permanent,
                     "uploaded_at": uploaded_at,
                     "expires_at": expires_at,
-                    "expires_at_iso": isoformat_utc(expires_at),
+                    "expires_at_iso": isoformat_utc(expires_at)
+                    if not permanent
+                    else None,
                     "direct_download_url": direct_download_url,
                     "raw_download_url": raw_download_url,
                     "raw_download_path": record["direct_path"],
@@ -2520,7 +2543,8 @@ def fileupload():
         response_payload: Dict[str, object] = {
             "message": f"Uploaded {len(results)} files successfully.",
             "files": results,
-            "retention_hours": retention_hours,
+            "retention_hours": retention_hours if not permanent else None,
+            "permanent": permanent,
         }
         return jsonify(response_payload), 201
 
@@ -2656,22 +2680,32 @@ def box_upload_files():
             ),
         )
 
-        try:
-            retention_hours = resolve_retention(config, *retention_candidates)
-        except RetentionValidationError as error:
-            allowed_range = error.allowed_range or [
-                config["retention_min_hours"],
-                config["retention_max_hours"],
-            ]
-            lifecycle_logger.warning(
-                "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
-                allowed_range[0],
-                allowed_range[1],
-            )
-            context = {
-                "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
-            }
-            return _box_error("retention_invalid", str(error), context=context)
+        permanent_header = request.headers.get("X-Localhosting-Permanent")
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(config, *retention_candidates)
+            except RetentionValidationError as error:
+                allowed_range = error.allowed_range or [
+                    config["retention_min_hours"],
+                    config["retention_max_hours"],
+                ]
+                lifecycle_logger.warning(
+                    "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
+                    allowed_range[0],
+                    allowed_range[1],
+                )
+                context = {
+                    "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
+                }
+                return _box_error("retention_invalid", str(error), context=context)
+        else:
+            retention_hours = 0
 
         quota_limit_bytes = storage_quota_limit_bytes()
         if quota_limit_bytes is not None:
@@ -2820,6 +2854,7 @@ def box_upload_files():
                         size=size,
                         retention_hours=retention_hours,
                         file_id=file_id,
+                        permanent=permanent,
                     )
             except StorageQuotaExceededError as quota_error:
                 if upload_path.exists():
@@ -3304,27 +3339,39 @@ def s3_multipart_upload(bucket: str):
 
         content_type = content_type or upload.content_type
 
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.form.get("x-amz-meta-retention-hours"),
-                request.headers.get("x-amz-meta-retention-hours"),
-                request.args.get("retentionHours"),
-            )
-        except RetentionValidationError as error:
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s",
-                bucket,
-                sanitize_log_value(key),
-            )
-            return _s3_error_response(
-                "InvalidRequest",
-                str(error),
-                bucket=bucket,
-                key=key,
-            )
+        permanent_header = request.form.get("x-amz-meta-permanent") or request.headers.get(
+            "x-amz-meta-permanent"
+        )
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.form.get("x-amz-meta-retention-hours"),
+                    request.headers.get("x-amz-meta-retention-hours"),
+                    request.args.get("retentionHours"),
+                )
+            except RetentionValidationError as error:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                lifecycle_logger.warning(
+                    "s3_upload_retention_invalid bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InvalidRequest",
+                    str(error),
+                    bucket=bucket,
+                    key=key,
+                )
+        else:
+            retention_hours = 0
 
         try:
             with quota_lock:
@@ -3336,6 +3383,7 @@ def s3_multipart_upload(bucket: str):
                     size=size,
                     retention_hours=retention_hours,
                     file_id=file_id,
+                    permanent=permanent,
                 )
         except StorageQuotaExceededError as quota_error:
             if upload_path.exists():
@@ -3548,26 +3596,36 @@ def s3_put_object(bucket: str, key: str):
                 status_code=500,
             )
 
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.headers.get("x-amz-meta-retention-hours"),
-                request.args.get("retentionHours"),
-            )
-        except RetentionValidationError as error:
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s",
-                bucket,
-                sanitize_log_value(key),
-            )
-            return _s3_error_response(
-                "InvalidRequest",
-                str(error),
-                bucket=bucket,
-                key=key,
-            )
+        permanent_header = request.headers.get("x-amz-meta-permanent")
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.headers.get("x-amz-meta-retention-hours"),
+                    request.args.get("retentionHours"),
+                )
+            except RetentionValidationError as error:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                lifecycle_logger.warning(
+                    "s3_upload_retention_invalid bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InvalidRequest",
+                    str(error),
+                    bucket=bucket,
+                    key=key,
+                )
+        else:
+            retention_hours = 0
 
         original_name = (
             request.headers.get("x-amz-meta-original-filename")
@@ -3613,6 +3671,7 @@ def s3_put_object(bucket: str, key: str):
                     size=size,
                     retention_hours=retention_hours,
                     file_id=file_id,
+                    permanent=permanent,
                 )
         except StorageQuotaExceededError as quota_error:
             if upload_path.exists():

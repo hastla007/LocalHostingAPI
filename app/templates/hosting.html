@@ -70,7 +70,13 @@
               <td>{{ file.size|human_filesize }}</td>
               <td>{{ file.uploaded_at|human_datetime }}</td>
               <td>{{ file.expires_at|human_datetime }}</td>
-              <td class="time-remaining">{{ file.remaining_seconds|human_timedelta }}</td>
+              <td class="time-remaining">
+                {% if file.permanent %}
+                  <span style="color: #059669; font-weight: 600;">∞ Permanent</span>
+                {% else %}
+                  {{ file.remaining_seconds|human_timedelta }}
+                {% endif %}
+              </td>
               <td class="actions-cell">
                 <a
                   href="{{ file.download_url }}"
