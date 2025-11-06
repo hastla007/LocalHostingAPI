@@ -866,23 +866,15 @@ def render_settings_page(config: Dict[str, Any]):
 
     storage_quota_limit = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
 
+    # Ensure all numeric values are properly formatted
     performance_settings = {
-        "max_concurrent_uploads": _coerce_positive_int(
-            config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or 10
-        ),
-        "cleanup_interval_minutes": _coerce_positive_int(
-            config.get("cleanup_interval_minutes"), cleanup_interval_minutes_setting or 5
-        ),
+        "max_upload_size_mb": float(config.get("max_upload_size_mb", 500)),
+        "max_concurrent_uploads": int(float(config.get("max_concurrent_uploads", 10))),
+        "cleanup_interval_minutes": int(float(config.get("cleanup_interval_minutes", 5))),
         "rate_limits": {
-            "upload_per_hour": _coerce_positive_int(
-                config.get("upload_rate_limit_per_hour"), 100
-            ),
-            "login_per_minute": _coerce_positive_int(
-                config.get("login_rate_limit_per_minute"), 10
-            ),
-            "download_per_minute": _coerce_positive_int(
-                config.get("download_rate_limit_per_minute"), 120
-            ),
+            "upload_per_hour": int(float(config.get("upload_rate_limit_per_hour", 100))),
+            "login_per_minute": int(float(config.get("login_rate_limit_per_minute", 10))),
+            "download_per_minute": int(float(config.get("download_rate_limit_per_minute", 120))),
         },
     }
 
@@ -1891,12 +1883,9 @@ def settings():
             flash("Retention settings updated.", "success")
 
         elif action == "update_performance":
-            upload_limit_input = request.form.get("max_upload_size_mb")
-            current_limit_mb = config.get("max_upload_size_mb") or (
-                app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024) / (1024 * 1024)
-            )
-
-            field_map = {
+            # Get all field values
+            field_inputs = {
+                "max_upload_size_mb": request.form.get("max_upload_size_mb"),
                 "max_concurrent_uploads": request.form.get("max_concurrent_uploads"),
                 "cleanup_interval_minutes": request.form.get("cleanup_interval_minutes"),
                 "upload_rate_limit_per_hour": request.form.get("upload_rate_limit_per_hour"),
@@ -1904,57 +1893,111 @@ def settings():
                 "download_rate_limit_per_minute": request.form.get("download_rate_limit_per_minute"),
             }
 
+            max_upload_input = field_inputs.pop("max_upload_size_mb")
+
+            # Validate all fields are present
+            missing_fields = [key for key, value in field_inputs.items() if value in (None, "")]
+            if missing_fields:
+                flash(f"Missing required fields: {', '.join(missing_fields)}", "error")
+                proposed = deepcopy(config)
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
+                if max_upload_input not in (None, ""):
+                    try:
+                        proposed["max_upload_size_mb"] = float(max_upload_input)
+                    except (TypeError, ValueError):
+                        proposed["max_upload_size_mb"] = max_upload_input
+                return render_settings_page(proposed)
+
+            # Parse and validate maximum upload size
             try:
-                parsed_values: Dict[str, int] = {}
-                for key, value in field_map.items():
-                    if value in (None, ""):
-                        raise ValueError
-                    parsed = int(float(value))
-                    if parsed < 1:
-                        raise ValueError
-                    parsed_values[key] = parsed
-
-                if upload_limit_input in (None, ""):
-                    upload_limit_mb = float(current_limit_mb)
+                if max_upload_input in (None, ""):
+                    upload_size_mb = float(config.get("max_upload_size_mb", 500))
                 else:
-                    upload_limit_mb = float(upload_limit_input)
+                    upload_size_mb = float(max_upload_input)
             except (TypeError, ValueError):
-                flash("Please provide valid positive numbers for performance settings.", "error")
+                flash("Please provide a valid number for maximum upload size.", "error")
                 proposed = deepcopy(config)
-                for key, raw_value in field_map.items():
-                    if raw_value is not None:
-                        proposed[key] = raw_value
-                if upload_limit_input is not None:
-                    proposed["max_upload_size_mb"] = upload_limit_input
+                if max_upload_input not in (None, ""):
+                    proposed["max_upload_size_mb"] = max_upload_input
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
                 return render_settings_page(proposed)
 
-            if upload_limit_mb < 1:
-                flash("Maximum upload size must be at least 1 MB.", "error")
+            if upload_size_mb < 1:
+                flash("Maximum upload size must be at least 1.", "error")
                 proposed = deepcopy(config)
-                proposed["max_upload_size_mb"] = upload_limit_input
-                for key, raw_value in field_map.items():
-                    if raw_value is not None:
-                        proposed[key] = raw_value
+                proposed["max_upload_size_mb"] = upload_size_mb
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
                 return render_settings_page(proposed)
 
+            # Parse and validate remaining values
+            try:
+                parsed_values = {}
+                for key, value in field_inputs.items():
+                    parsed = float(value)
+                    if parsed < 1:
+                        flash(f"{key.replace('_', ' ').title()} must be at least 1.", "error")
+                        proposed = deepcopy(config)
+                        for k, v in field_inputs.items():
+                            if v is not None:
+                                try:
+                                    proposed[k] = float(v)
+                                except (TypeError, ValueError):
+                                    pass
+                        proposed["max_upload_size_mb"] = upload_size_mb
+                        return render_settings_page(proposed)
+                    # Store as appropriate type
+                    if key in {"max_concurrent_uploads", "cleanup_interval_minutes",
+                               "upload_rate_limit_per_hour", "login_rate_limit_per_minute",
+                               "download_rate_limit_per_minute"}:
+                        parsed_values[key] = int(parsed)
+                    else:
+                        parsed_values[key] = parsed
+            except (TypeError, ValueError) as e:
+                flash("Please provide valid positive numbers for all performance settings.", "error")
+                proposed = deepcopy(config)
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
+                proposed["max_upload_size_mb"] = upload_size_mb
+                return render_settings_page(proposed)
+
+            # Save the config
             proposed = deepcopy(config)
+            parsed_values["max_upload_size_mb"] = upload_size_mb
             proposed.update(parsed_values)
-            proposed["max_upload_size_mb"] = upload_limit_mb
 
             save_config(proposed)
             get_config(refresh=True)
             refreshed = True
 
             lifecycle_logger.info(
-                "performance_settings_updated max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d upload_limit=%.2f",
-                parsed_values["max_concurrent_uploads"],
-                parsed_values["cleanup_interval_minutes"],
-                parsed_values["upload_rate_limit_per_hour"],
-                parsed_values["login_rate_limit_per_minute"],
-                parsed_values["download_rate_limit_per_minute"],
-                upload_limit_mb,
+                "performance_settings_updated max_upload_size=%.2f max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d",
+                parsed_values.get("max_upload_size_mb", 0),
+                parsed_values.get("max_concurrent_uploads", 0),
+                parsed_values.get("cleanup_interval_minutes", 0),
+                parsed_values.get("upload_rate_limit_per_hour", 0),
+                parsed_values.get("login_rate_limit_per_minute", 0),
+                parsed_values.get("download_rate_limit_per_minute", 0),
             )
-            flash("Performance settings updated.", "success")
+            flash("Performance settings updated successfully.", "success")
 
         elif action == "update_ui_auth":
             auth_enabled = request.form.get("ui_auth_enabled") == "on"
