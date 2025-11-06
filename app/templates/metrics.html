@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>System Metrics</h2>
+    <p class="metrics-subtitle">Real-time statistics and system health monitoring</p>
+  </section>
+
+  <div class="metrics-grid">
+    <!-- Storage Overview -->
+    <section class="card metric-card">
+      <h3>📊 Storage Overview</h3>
+      <div class="metric-stats">
+        <div class="metric-stat">
+          <div class="metric-label">Total Files</div>
+          <div class="metric-value">{{ storage_stats.active_count + storage_stats.expired_count }}</div>
+        </div>
+        <div class="metric-stat">
+          <div class="metric-label">Active Files</div>
+          <div class="metric-value">{{ storage_stats.active_count }}</div>
+        </div>
+        <div class="metric-stat">
+          <div class="metric-label">Expired Files</div>
+          <div class="metric-value">{{ storage_stats.expired_count }}</div>
+        </div>
+        <div class="metric-stat">
+          <div class="metric-label">Total Size</div>
+          <div class="metric-value">{{ storage_stats.total_bytes | human_filesize }}</div>
+        </div>
+      </div>
+      {% if quota_limit_gb %}
+        <div class="metric-progress">
+          <div class="progress-label">Storage Quota Usage</div>
+          <div class="progress">
+            <div class="progress-bar" style="width: {{ [quota_used_percent, 100]|min }}%; background: {% if quota_used_percent >= 90 %}#dc2626{% elif quota_used_percent >= 75 %}#f97316{% else %}#2563eb{% endif %};"></div>
+          </div>
+          <div class="progress-text">{{ '%.2f'|format(quota_used_percent) }}% of {{ '%.2f'|format(quota_limit_gb) }} GB</div>
+        </div>
+      {% endif %}
+    </section>
+
+    <!-- System Health -->
+    <section class="card metric-card">
+      <h3>🏥 System Health</h3>
+      <div class="health-checks">
+        <div class="health-item">
+          <div class="health-label">Database</div>
+          <div class="health-status {{ health_checks.database.status }}">
+            {% if health_checks.database.status == 'healthy' %}✓ Connected{% else %}✗ {{ health_checks.database.message }}{% endif %}
+          </div>
+        </div>
+        <div class="health-item">
+          <div class="health-label">Disk Space</div>
+          <div class="health-status {{ health_checks.disk.status }}">
+            {% if health_checks.disk.status in ('healthy', 'warning', 'critical') %}
+              {{ '%.2f'|format(health_checks.disk.free_gb) }} GB free / {{ '%.2f'|format(health_checks.disk.total_gb) }} GB total
+            {% else %}
+              ✗ {{ health_checks.disk.message }}
+            {% endif %}
+          </div>
+        </div>
+        {% if health_checks.disk.status in ('healthy', 'warning', 'critical') %}
+          <div class="metric-progress">
+            <div class="progress-label">Disk Usage</div>
+            <div class="progress">
+              <div class="progress-bar" style="width: {{ health_checks.disk.percent_used }}%; background: {% if health_checks.disk.percent_used >= 90 %}#dc2626{% elif health_checks.disk.percent_used >= 75 %}#f97316{% else %}#2563eb{% endif %};"></div>
+            </div>
+            <div class="progress-text">{{ '%.1f'|format(health_checks.disk.percent_used) }}% used</div>
+          </div>
+        {% endif %}
+        <div class="health-item">
+          <div class="health-label">Upload Slots</div>
+          <div class="health-status healthy">
+            {{ health_checks.upload_limiter.available_slots }} / {{ health_checks.upload_limiter.current_limit }} available
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- File Retention Breakdown -->
+    <section class="card metric-card">
+      <h3>⏱️ File Retention</h3>
+      <div class="retention-breakdown">
+        <div class="retention-item">
+          <div class="retention-label">Permanent</div>
+          <div class="retention-value">{{ retention_breakdown.permanent }}</div>
+        </div>
+        <div class="retention-item">
+          <div class="retention-label">&lt; 1 hour</div>
+          <div class="retention-value">{{ retention_breakdown.less_1h }}</div>
+        </div>
+        <div class="retention-item">
+          <div class="retention-label">1-6 hours</div>
+          <div class="retention-value">{{ retention_breakdown['1h_to_6h'] }}</div>
+        </div>
+        <div class="retention-item">
+          <div class="retention-label">6-24 hours</div>
+          <div class="retention-value">{{ retention_breakdown['6h_to_24h'] }}</div>
+        </div>
+        <div class="retention-item">
+          <div class="retention-label">1-7 days</div>
+          <div class="retention-value">{{ retention_breakdown['1d_to_7d'] }}</div>
+        </div>
+        <div class="retention-item">
+          <div class="retention-label">&gt; 7 days</div>
+          <div class="retention-value">{{ retention_breakdown.more_7d }}</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Configuration -->
+    <section class="card metric-card">
+      <h3>⚙️ Configuration</h3>
+      <div class="config-stats">
+        <div class="config-item">
+          <div class="config-label">Default Retention</div>
+          <div class="config-value">{{ config_snapshot.retention_hours }} hours</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">Retention Range</div>
+          <div class="config-value">{{ config_snapshot.retention_min_hours }}-{{ config_snapshot.retention_max_hours }} hours</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">Max Upload Size</div>
+          <div class="config-value">{{ config_snapshot.max_upload_size_mb|int }} MB</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">Concurrent Uploads</div>
+          <div class="config-value">{{ config_snapshot.max_concurrent_uploads }}</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">Cleanup Interval</div>
+          <div class="config-value">{{ config_snapshot.cleanup_interval_minutes }} minutes</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">UI Authentication</div>
+          <div class="config-value">{{ 'Enabled' if config_snapshot.ui_auth_enabled else 'Disabled' }}</div>
+        </div>
+        <div class="config-item">
+          <div class="config-label">API Authentication</div>
+          <div class="config-value">
+            {{ 'Enabled' if config_snapshot.api_auth_enabled else 'Disabled' }}
+            {% if config_snapshot.api_auth_enabled %}({{ config_snapshot.api_keys_count }} keys){% endif %}
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Recent Uploads -->
+  <section class="card">
+    <h3>📁 Recent Uploads</h3>
+    {% if recent_files %}
+      <table class="file-table metrics-table">
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Size</th>
+            <th>Uploaded</th>
+            <th>Status</th>
+            <th>Time Remaining</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for file in recent_files %}
+            <tr>
+              <td>{{ file.original_name }}</td>
+              <td>{{ file.size | human_filesize }}</td>
+              <td>{{ file.uploaded_at | human_datetime }}</td>
+              <td>
+                {% if file.permanent %}
+                  <span class="status-badge permanent">Permanent</span>
+                {% else %}
+                  <span class="status-badge active">Active</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if file.permanent %}
+                  <span style="color: #059669; font-weight: 600;">∞</span>
+                {% else %}
+                  {{ file.remaining_seconds | human_timedelta }}
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>No recent uploads.</p>
+    {% endif %}
+  </section>
+{% endblock %}
