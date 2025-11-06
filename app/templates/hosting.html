@@ -108,8 +108,13 @@
                     <span class="icon" aria-hidden="true">🌐</span>
                   </a>
                 {% endif %}
-                <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
+                <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form delete-form" data-filename="{{ file.original_name }}">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="page" value="{{ page }}" />
+                  <input type="hidden" name="per_page" value="{{ per_page }}" />
+                  <input type="hidden" name="sort" value="{{ sort_by }}" />
+                  <input type="hidden" name="order" value="{{ sort_order }}" />
+                  <input type="hidden" name="search" value="{{ search }}" />
                   <button
                     type="submit"
                     class="button danger icon-only"
@@ -241,6 +246,32 @@
             const absoluteUrl = url.startsWith('http') ? url : window.location.origin + url;
             copyToClipboard(absoluteUrl, filename || absoluteUrl);
           }
+        });
+      });
+    })();
+  </script>
+  <script>
+    // Delete confirmation handler
+    (function() {
+      const deleteForms = document.querySelectorAll('.delete-form');
+
+      deleteForms.forEach(function(form) {
+        form.addEventListener('submit', function(e) {
+          const filename = this.getAttribute('data-filename') || 'this file';
+
+          if (!confirm('Delete ' + filename + '? This action cannot be undone.')) {
+            e.preventDefault();
+            return false;
+          }
+
+          // Optional: Show visual feedback
+          const button = this.querySelector('button[type="submit"]');
+          if (button) {
+            button.disabled = true;
+            button.style.opacity = '0.5';
+          }
+
+          return true;
         });
       });
     })();
