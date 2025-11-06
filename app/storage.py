@@ -34,6 +34,10 @@ LOGS_DIR = _resolve_env_path("LOCALHOSTING_LOGS_DIR", STORAGE_ROOT / "logs")
 DB_PATH = DATA_DIR / "files.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+# Sentinel timestamp used to represent permanent retention. The value is far in
+# the future while remaining within SQLite's supported REAL precision.
+PERMANENT_EXPIRATION = 9_999_999_999.0
+
 def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
@@ -331,7 +335,8 @@ def init_db() -> None:
                 size INTEGER NOT NULL,
                 uploaded_at REAL NOT NULL,
                 expires_at REAL NOT NULL,
-                direct_path TEXT
+                direct_path TEXT,
+                permanent INTEGER DEFAULT 0
             )
             """
         )
@@ -343,12 +348,33 @@ def init_db() -> None:
         if "direct_path" not in columns:
             conn.execute("ALTER TABLE files ADD COLUMN direct_path TEXT")
             conn.commit()
+        if "permanent" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
+            conn.commit()
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_direct_path ON files(direct_path)"
         )
         conn.commit()
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_expires_at ON files(expires_at)"
+        )
+        conn.commit()
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
+        )
+        conn.commit()
+
+
+def migrate_permanent_storage():
+    """Add permanent column to files table if it doesn't exist."""
+    with get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+        if "permanent" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
+            conn.commit()
+            logger.info("Added permanent column to files table")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
         )
         conn.commit()
 
@@ -472,10 +498,15 @@ def register_file(
     size: int,
     retention_hours: float,
     file_id: Optional[str] = None,
+    permanent: bool = False,
 ) -> str:
     file_id = file_id or str(uuid.uuid4())
     uploaded_at = time.time()
-    expires_at = calculate_expiration(retention_hours)
+    expires_at = (
+        PERMANENT_EXPIRATION
+        if permanent
+        else calculate_expiration(retention_hours)
+    )
     direct_path: Optional[str] = None
     max_attempts = 5
 
@@ -486,6 +517,8 @@ def register_file(
             pending_paths = set()
             g._pending_direct_paths = pending_paths
 
+    permanent_flag = 1 if permanent else 0
+
     for attempt in range(max_attempts):
         try:
             with get_db() as conn:
@@ -495,8 +528,18 @@ def register_file(
                 )
                 conn.execute(
                     """
-                    INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO files (
+                        id,
+                        original_name,
+                        stored_name,
+                        content_type,
+                        size,
+                        uploaded_at,
+                        expires_at,
+                        direct_path,
+                        permanent
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         file_id,
@@ -507,6 +550,7 @@ def register_file(
                         uploaded_at,
                         expires_at,
                         direct_path,
+                        permanent_flag,
                     ),
                 )
             break
@@ -514,7 +558,7 @@ def register_file(
             if "direct_path" not in str(error):
                 raise
             if attempt == max_attempts - 1:
-                params = (
+                base_params = (
                     file_id,
                     original_name,
                     stored_name,
@@ -522,6 +566,7 @@ def register_file(
                     size,
                     uploaded_at,
                     expires_at,
+                    permanent_flag,
                 )
                 fallback_base = secure_filename(original_name) or "file"
                 fallback_options = [
@@ -537,10 +582,20 @@ def register_file(
                             conn.execute("BEGIN IMMEDIATE")
                             conn.execute(
                                 """
-                                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO files (
+                                    id,
+                                    original_name,
+                                    stored_name,
+                                    content_type,
+                                    size,
+                                    uploaded_at,
+                                    expires_at,
+                                    direct_path,
+                                    permanent
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
-                                params + (fallback_candidate,),
+                                base_params[:-1] + (fallback_candidate, base_params[-1]),
                             )
                         direct_path = fallback_candidate
                         inserted = True
@@ -572,13 +627,14 @@ def register_file(
             raise
 
     logger.info(
-        "upload_registered file_id=%s original_name=%s size=%d retention_hours=%.2f expires_at=%f direct_path=%s",
+        "upload_registered file_id=%s original_name=%s size=%d retention_hours=%.2f expires_at=%f direct_path=%s permanent=%s",
         file_id,
         original_name,
         size,
         retention_hours,
         expires_at,
         direct_path,
+        permanent,
     )
     return file_id
 
@@ -699,7 +755,10 @@ def cleanup_expired_files() -> int:
     now = time.time()
     removed = 0
     with get_db() as conn:
-        cursor = conn.execute("SELECT id, stored_name FROM files WHERE expires_at < ?", (now,))
+        cursor = conn.execute(
+            "SELECT id, stored_name FROM files WHERE expires_at < ? AND permanent = 0",
+            (now,),
+        )
         expired_files = cursor.fetchall()
         for record in expired_files:
             file_path = get_storage_path(record["id"], record["stored_name"])
@@ -865,7 +924,12 @@ def get_storage_statistics() -> Dict[str, int]:
 
 def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
     for row in records:
-        remaining_seconds = max(row["expires_at"] - time.time(), 0)
+        is_permanent = bool(row["permanent"]) if "permanent" in row.keys() else False
+        remaining_seconds = (
+            float("inf")
+            if is_permanent
+            else max(row["expires_at"] - time.time(), 0)
+        )
         yield {
             "id": row["id"],
             "original_name": row["original_name"],
@@ -875,6 +939,7 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             "uploaded_at": row["uploaded_at"],
             "expires_at": row["expires_at"],
             "remaining_seconds": remaining_seconds,
+            "permanent": is_permanent,
             "download_url": f"/download/{row['id']}",
             "direct_download_url": f"/files/{row['id']}/{quote(row['original_name'])}",
             "raw_download_path": row["direct_path"],
@@ -893,4 +958,5 @@ logger = logging.getLogger("localhosting.storage")
 
 ensure_directories()
 init_db()
+migrate_permanent_storage()
 backfill_direct_paths()
