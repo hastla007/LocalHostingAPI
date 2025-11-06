@@ -108,7 +108,7 @@
                     <span class="icon" aria-hidden="true">🌐</span>
                   </a>
                 {% endif %}
-                <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form delete-form" data-filename="{{ file.original_name }}">
+                <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form delete-form" data-filename="{{ file.original_name }}" data-file-id="{{ file.id }}">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="page" value="{{ page }}" />
                   <input type="hidden" name="per_page" value="{{ per_page }}" />
@@ -116,10 +116,12 @@
                   <input type="hidden" name="order" value="{{ sort_order }}" />
                   <input type="hidden" name="search" value="{{ search }}" />
                   <button
-                    type="submit"
-                    class="button danger icon-only"
+                    type="button"
+                    class="button danger icon-only delete-btn"
                     title="Delete file"
                     aria-label="Delete file"
+                    data-filename="{{ file.original_name }}"
+                    data-file-id="{{ file.id }}"
                   >
                     <span class="icon" aria-hidden="true">🗑️</span>
                   </button>
@@ -160,44 +162,70 @@
     <span class="copy-toast-icon">✓</span>
     <span class="copy-toast-text"></span>
   </div>
+
+  <!-- Debug info -->
+  <div id="debug-info" style="position: fixed; bottom: 10px; right: 10px; background: #333; color: #fff; padding: 10px; font-size: 12px; border-radius: 5px; max-width: 300px; display: none;">
+    <strong>Debug Info:</strong>
+    <div id="debug-log"></div>
+  </div>
 {% endblock %}
 
 {% block scripts %}
   <script>
+    // Debug logger
+    const debugLog = [];
+    function addDebug(msg) {
+      console.log('[DEBUG]', msg);
+      debugLog.push(new Date().toLocaleTimeString() + ': ' + msg);
+      const debugEl = document.getElementById('debug-log');
+      if (debugEl) {
+        debugEl.innerHTML = debugLog.slice(-5).join('<br>');
+      }
+    }
+
+    // Show debug panel
+    window.addEventListener('keydown', function(e) {
+      if (e.key === 'D' && e.ctrlKey && e.shiftKey) {
+        const panel = document.getElementById('debug-info');
+        if (panel) {
+          panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        }
+      }
+    });
+
+    addDebug('Script loaded');
+
+    // Copy link functionality
     (function() {
       const copyButtons = document.querySelectorAll('.copy-link-btn');
       const toast = document.getElementById('copy-toast');
       const toastText = toast ? toast.querySelector('.copy-toast-text') : null;
       let toastTimeout = null;
 
+      addDebug('Found ' + copyButtons.length + ' copy buttons');
+
       function showToast(message, duration = 2000) {
         if (!toast || !toastText) return;
-
-        // Clear any existing timeout
         if (toastTimeout) {
           clearTimeout(toastTimeout);
         }
-
-        // Update and show toast
         toastText.textContent = message;
         toast.classList.remove('hidden');
         toast.classList.add('show');
-
-        // Hide after duration
         toastTimeout = setTimeout(function() {
           toast.classList.remove('show');
           setTimeout(function() {
             toast.classList.add('hidden');
-          }, 300); // Wait for fade out animation
+          }, 300);
         }, duration);
       }
 
       function copyToClipboard(text, filename) {
-        // Try modern clipboard API first
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text)
             .then(function() {
               showToast('Link copied: ' + filename);
+              addDebug('Copied: ' + filename);
             })
             .catch(function(err) {
               console.error('Clipboard API failed:', err);
@@ -209,7 +237,6 @@
       }
 
       function fallbackCopy(text, filename) {
-        // Fallback for older browsers
         const textarea = document.createElement('textarea');
         textarea.value = text;
         textarea.style.position = 'fixed';
@@ -223,18 +250,20 @@
           const successful = document.execCommand('copy');
           if (successful) {
             showToast('Link copied: ' + filename);
+            addDebug('Copied (fallback): ' + filename);
           } else {
             showToast('Failed to copy link', 3000);
+            addDebug('Copy failed');
           }
         } catch (err) {
           console.error('Fallback copy failed:', err);
           showToast('Copy not supported in this browser', 3000);
+          addDebug('Copy error: ' + err.message);
         } finally {
           document.body.removeChild(textarea);
         }
       }
 
-      // Add click handlers to all copy buttons
       copyButtons.forEach(function(button) {
         button.addEventListener('click', function(e) {
           e.preventDefault();
@@ -242,54 +271,107 @@
           const filename = this.getAttribute('data-filename');
           
           if (url) {
-            // Convert relative URL to absolute if needed
             const absoluteUrl = url.startsWith('http') ? url : window.location.origin + url;
             copyToClipboard(absoluteUrl, filename || absoluteUrl);
           }
         });
       });
     })();
-  </script>
-  <script>
-    // Delete confirmation handler - FIXED VERSION
-    document.addEventListener('DOMContentLoaded', function() {
-      const deleteForms = document.querySelectorAll('.delete-form');
+
+    // Delete functionality - COMPREHENSIVE VERSION
+    (function() {
+      addDebug('Setting up delete handlers');
       
-      console.log('Found ' + deleteForms.length + ' delete forms');
+      // Wait for DOM to be fully ready
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initDeleteHandlers);
+      } else {
+        initDeleteHandlers();
+      }
 
-      deleteForms.forEach(function(form, index) {
-        form.addEventListener('submit', function(e) {
-          e.preventDefault(); // Always prevent default first
-          e.stopPropagation(); // Prevent event bubbling
+      function initDeleteHandlers() {
+        addDebug('DOM ready, initializing delete');
+        
+        const deleteButtons = document.querySelectorAll('.delete-btn');
+        addDebug('Found ' + deleteButtons.length + ' delete buttons');
+
+        if (deleteButtons.length === 0) {
+          addDebug('WARNING: No delete buttons found!');
+          return;
+        }
+
+        deleteButtons.forEach(function(button, index) {
+          const filename = button.getAttribute('data-filename') || 'unknown';
+          const fileId = button.getAttribute('data-file-id') || 'unknown';
           
-          const filename = this.getAttribute('data-filename') || 'this file';
-          const confirmMessage = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
+          addDebug('Attaching handler ' + index + ': ' + filename);
 
-          console.log('Delete clicked for: ' + filename);
-
-          if (window.confirm(confirmMessage)) {
-            console.log('User confirmed deletion');
+          button.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
             
-            // Show visual feedback
-            const button = this.querySelector('button[type="submit"]');
-            if (button) {
-              button.disabled = true;
-              button.style.opacity = '0.5';
-              const icon = button.querySelector('.icon');
+            addDebug('Delete clicked: ' + filename + ' (ID: ' + fileId + ')');
+
+            const form = this.closest('form');
+            if (!form) {
+              addDebug('ERROR: No parent form found!');
+              alert('Error: Cannot find delete form');
+              return;
+            }
+
+            const action = form.getAttribute('action');
+            const method = form.getAttribute('method');
+            addDebug('Form action: ' + action);
+            addDebug('Form method: ' + method);
+
+            // Check CSRF token
+            const csrfInput = form.querySelector('input[name="csrf_token"]');
+            if (csrfInput) {
+              addDebug('CSRF token present: ' + csrfInput.value.substring(0, 10) + '...');
+            } else {
+              addDebug('WARNING: No CSRF token found!');
+            }
+
+            // Show confirmation
+            const confirmMsg = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
+            addDebug('Showing confirmation dialog');
+            
+            const confirmed = window.confirm(confirmMsg);
+            addDebug('User response: ' + (confirmed ? 'CONFIRMED' : 'CANCELLED'));
+
+            if (confirmed) {
+              // Change button to loading state
+              const icon = this.querySelector('.icon');
               if (icon) {
                 icon.textContent = '⏳';
               }
+              this.disabled = true;
+              this.style.opacity = '0.5';
+              
+              addDebug('Submitting form...');
+              
+              // Submit the form
+              try {
+                form.submit();
+                addDebug('Form submitted successfully');
+              } catch (err) {
+                addDebug('ERROR submitting form: ' + err.message);
+                alert('Error submitting form: ' + err.message);
+                // Restore button
+                if (icon) {
+                  icon.textContent = '🗑️';
+                }
+                this.disabled = false;
+                this.style.opacity = '1';
+              }
             }
-            
-            // Actually submit the form
-            this.submit();
-          } else {
-            console.log('User cancelled deletion');
-          }
-          
-          return false;
+          });
         });
-      });
-    });
+
+        addDebug('All delete handlers attached');
+      }
+    })();
+
+    addDebug('All scripts initialized');
   </script>
 {% endblock %}
