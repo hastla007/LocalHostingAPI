@@ -2,7 +2,7 @@
 {% block content %}
   <section class="card">
     <h2>UI Authentication</h2>
-    <form method="post" class="form-grid auth-grid">
+    <form method="post" action="{{ url_for('settings') }}" class="form-grid auth-grid">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_ui_auth" />
 
@@ -55,7 +55,7 @@
   <div class="settings-row">
     <section class="card retention-card">
       <h2>Retention Settings</h2>
-      <form method="post" class="retention-system-form">
+      <form method="post" action="{{ url_for('settings') }}" class="retention-system-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <input type="hidden" name="action" value="update_retention" />
 
@@ -132,12 +132,12 @@
         </tbody>
       </table>
       <div class="settings-action-row">
-        <form method="post">
+        <form method="post" action="{{ url_for('settings') }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="action" value="cleanup_expired_now" />
           <button type="submit" class="button primary">Cleanup Expired Files Now</button>
         </form>
-        <form method="post">
+        <form method="post" action="{{ url_for('settings') }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="action" value="cleanup_orphaned_now" />
           <button type="submit" class="button secondary">Remove Orphaned Files</button>
@@ -152,7 +152,7 @@
 
   <section class="card">
     <h2>Performance Settings</h2>
-    <form method="post" class="performance-form" id="performance-form" novalidate>
+    <form method="post" action="{{ url_for('settings') }}" class="performance-form" id="performance-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" id="csrf-token" />
       <input type="hidden" name="action" value="update_performance" />
       <table class="settings-table">
@@ -269,13 +269,8 @@
       </table>
       <div class="form-actions">
         <button type="submit" class="button primary" id="save-performance-btn">Save Performance Settings</button>
-        <button type="button" class="button secondary" id="test-form-btn">Test Form Data</button>
       </div>
     </form>
-    <div id="form-debug" style="margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 5px; font-family: monospace; font-size: 12px; display: none;">
-      <strong>Form Debug Info:</strong>
-      <pre id="form-debug-content"></pre>
-    </div>
     <p class="form-help">
       These limits update immediately after saving. The scheduler interval applies to background cleanup jobs and may take up to
       one full interval to reflect the new cadence.
@@ -302,212 +297,35 @@
       can be edited directly through the dashboard.
     </p>
   </section>
-
-  <!-- Debug panel -->
-  <div id="debug-panel" style="position: fixed; bottom: 10px; right: 10px; background: #333; color: #fff; padding: 15px; font-size: 12px; border-radius: 5px; max-width: 400px; max-height: 300px; overflow-y: auto; display: none; z-index: 10000;">
-    <strong>Debug Log:</strong> <button onclick="document.getElementById('debug-panel').style.display='none'" style="float: right; background: #666; color: #fff; border: none; padding: 2px 8px; cursor: pointer;">Close</button>
-    <div id="debug-log" style="margin-top: 10px; font-family: monospace;"></div>
-  </div>
 {% endblock %}
 
 {% block scripts %}
   <script>
-    // Debug system
-    const debugLog = [];
-    function addDebug(msg, type) {
-      const timestamp = new Date().toLocaleTimeString();
-      const prefix = type === 'error' ? '[ERROR]' : type === 'warn' ? '[WARN]' : '[DEBUG]';
-      const fullMsg = timestamp + ' ' + prefix + ' ' + msg;
-      
-      console.log(fullMsg);
-      debugLog.push(fullMsg);
-      
-      const debugEl = document.getElementById('debug-log');
-      if (debugEl) {
-        debugEl.innerHTML = debugLog.slice(-20).map(function(m) {
-          if (m.includes('[ERROR]')) {
-            return '<div style="color: #ff6b6b;">' + m + '</div>';
-          } else if (m.includes('[WARN]')) {
-            return '<div style="color: #ffd93d;">' + m + '</div>';
-          }
-          return '<div>' + m + '</div>';
-        }).join('');
-      }
-    }
-
-    // Show debug panel with Ctrl+Shift+D
-    window.addEventListener('keydown', function(e) {
-      if (e.key === 'D' && e.ctrlKey && e.shiftKey) {
-        const panel = document.getElementById('debug-panel');
-        if (panel) {
-          panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-        }
-      }
-    });
-
-    addDebug('Settings page script loaded');
-
-    // Performance form handling
+    // Performance form submission
     (function() {
       const form = document.getElementById('performance-form');
       const saveBtn = document.getElementById('save-performance-btn');
-      const testBtn = document.getElementById('test-form-btn');
-      const formDebug = document.getElementById('form-debug');
-      const formDebugContent = document.getElementById('form-debug-content');
-      const csrfInput = document.getElementById('csrf-token');
 
       if (!form) {
-        addDebug('ERROR: Performance form not found!', 'error');
+        console.error('Performance form not found');
         return;
       }
 
-      addDebug('Performance form found');
-      addDebug('Form action: ' + form.getAttribute('action'));
-      addDebug('Form method: ' + form.getAttribute('method'));
-      
-      if (csrfInput) {
-        addDebug('CSRF token present: ' + csrfInput.value.substring(0, 15) + '...');
-      } else {
-        addDebug('WARNING: No CSRF token found!', 'warn');
-      }
+      console.log('Performance form found');
+      console.log('Form action:', form.getAttribute('action'));
+      console.log('Form method:', form.getAttribute('method'));
 
-      // Test button to show form data without submitting
-      if (testBtn) {
-        testBtn.addEventListener('click', function(e) {
-          e.preventDefault();
-          addDebug('Test button clicked');
-          
-          const formData = new FormData(form);
-          const data = {};
-          let output = '';
-          
-          for (let [key, value] of formData.entries()) {
-            data[key] = value;
-            output += key + ': ' + value + '\n';
-            addDebug('Field ' + key + ' = ' + value);
-          }
-          
-          if (formDebugContent) {
-            formDebugContent.textContent = output;
-          }
-          if (formDebug) {
-            formDebug.style.display = 'block';
-          }
-          
-          addDebug('Form data collected: ' + Object.keys(data).length + ' fields');
-          
-          // Show debug panel
-          const panel = document.getElementById('debug-panel');
-          if (panel) {
-            panel.style.display = 'block';
-          }
-        });
-      }
-
-      // Form submission handler
       form.addEventListener('submit', function(e) {
-        e.preventDefault();
-        addDebug('Form submission intercepted');
-
-        // Collect all form data
-        const formData = new FormData(this);
-        const values = {};
+        console.log('Form submitted');
         
-        for (let [key, value] of formData.entries()) {
-          values[key] = value;
-          addDebug('Submit field: ' + key + ' = ' + value);
-        }
-
-        // Check action field
-        if (values.action !== 'update_performance') {
-          addDebug('WARNING: action field is "' + values.action + '" instead of "update_performance"', 'warn');
-        }
-
-        // Validate required fields
-        const requiredFields = [
-          'max_upload_size_mb',
-          'max_concurrent_uploads',
-          'cleanup_interval_minutes',
-          'upload_rate_limit_per_hour',
-          'login_rate_limit_per_minute',
-          'download_rate_limit_per_minute'
-        ];
-
-        const missingFields = [];
-        const invalidFields = [];
-
-        for (let field of requiredFields) {
-          const value = values[field];
-          
-          if (!value || value === '') {
-            missingFields.push(field);
-            addDebug('ERROR: Missing field: ' + field, 'error');
-          } else {
-            const numValue = parseFloat(value);
-            if (isNaN(numValue)) {
-              invalidFields.push(field + ' (not a number)');
-              addDebug('ERROR: Invalid number in ' + field + ': ' + value, 'error');
-            } else if (numValue < 1) {
-              invalidFields.push(field + ' (must be >= 1)');
-              addDebug('ERROR: Value too small in ' + field + ': ' + value, 'error');
-            } else {
-              addDebug('Valid: ' + field + ' = ' + numValue);
-            }
-          }
-        }
-
-        if (missingFields.length > 0) {
-          const msg = 'Missing required fields:\n' + missingFields.join('\n');
-          alert(msg);
-          addDebug('Validation failed: missing fields', 'error');
-          // Show debug panel
-          document.getElementById('debug-panel').style.display = 'block';
-          return false;
-        }
-
-        if (invalidFields.length > 0) {
-          const msg = 'Invalid values:\n' + invalidFields.join('\n');
-          alert(msg);
-          addDebug('Validation failed: invalid values', 'error');
-          // Show debug panel
-          document.getElementById('debug-panel').style.display = 'block';
-          return false;
-        }
-
-        addDebug('All validation passed');
-
-        // Update button state
+        // Let the form submit naturally - browser will handle it
+        // Just show loading state
         if (saveBtn) {
           saveBtn.disabled = true;
           saveBtn.textContent = 'Saving...';
           saveBtn.style.opacity = '0.6';
         }
-
-        addDebug('Submitting form now...');
-
-        // Submit the form
-        try {
-          this.submit();
-          addDebug('Form submitted successfully');
-        } catch (err) {
-          addDebug('ERROR: Form submission failed: ' + err.message, 'error');
-          alert('Error submitting form: ' + err.message);
-          
-          // Restore button
-          if (saveBtn) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save Performance Settings';
-            saveBtn.style.opacity = '1';
-          }
-          
-          // Show debug panel
-          document.getElementById('debug-panel').style.display = 'block';
-        }
       });
-
-      addDebug('Form submission handler attached');
     })();
-
-    addDebug('All scripts initialized');
   </script>
 {% endblock %}

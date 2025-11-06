@@ -108,7 +108,13 @@
                     <span class="icon" aria-hidden="true">🌐</span>
                   </a>
                 {% endif %}
-                <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form delete-form" data-filename="{{ file.original_name }}">
+                <form 
+                  method="post" 
+                  action="{{ url_for('hosting_delete', file_id=file.id) }}" 
+                  class="inline-form delete-form"
+                  data-filename="{{ file.original_name }}"
+                  onsubmit="return confirmDelete(this, event);"
+                >
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="page" value="{{ page }}" />
                   <input type="hidden" name="per_page" value="{{ per_page }}" />
@@ -116,8 +122,8 @@
                   <input type="hidden" name="order" value="{{ sort_order }}" />
                   <input type="hidden" name="search" value="{{ search }}" />
                   <button
-                    type="button"
-                    class="button danger icon-only delete-button"
+                    type="submit"
+                    class="button danger icon-only"
                     title="Delete file"
                     aria-label="Delete file"
                   >
@@ -164,36 +170,90 @@
 
 {% block scripts %}
   <script>
+    // Global delete confirmation function
+    function confirmDelete(form, event) {
+      event.preventDefault();
+      event.stopPropagation();
+      
+      const filename = form.getAttribute('data-filename') || 'this file';
+      const action = form.getAttribute('action');
+      
+      console.log('Delete requested for:', filename);
+      console.log('Form action:', action);
+      console.log('Form method:', form.getAttribute('method'));
+      
+      const confirmMsg = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
+      
+      if (window.confirm(confirmMsg)) {
+        console.log('User confirmed - submitting form');
+        
+        // Show loading state on button
+        const button = form.querySelector('button[type="submit"]');
+        if (button) {
+          const icon = button.querySelector('.icon');
+          if (icon) {
+            icon.textContent = '⏳';
+          }
+          button.disabled = true;
+          button.style.opacity = '0.5';
+        }
+        
+        // Submit the form
+        try {
+          form.submit();
+          console.log('Form submitted successfully');
+          return true;
+        } catch (err) {
+          console.error('Error submitting form:', err);
+          alert('Error: ' + err.message);
+          
+          // Restore button
+          if (button) {
+            const icon = button.querySelector('.icon');
+            if (icon) {
+              icon.textContent = '🗑️';
+            }
+            button.disabled = false;
+            button.style.opacity = '1';
+          }
+          return false;
+        }
+      } else {
+        console.log('User cancelled delete');
+        return false;
+      }
+    }
+    
+    // Make it available globally
+    window.confirmDelete = confirmDelete;
+
+    // Copy link functionality
     (function() {
       const copyButtons = document.querySelectorAll('.copy-link-btn');
       const toast = document.getElementById('copy-toast');
       const toastText = toast ? toast.querySelector('.copy-toast-text') : null;
       let toastTimeout = null;
 
-      function showToast(message, duration = 2000) {
-        if (!toast || !toastText) return;
+      console.log('Found ' + copyButtons.length + ' copy buttons');
 
-        // Clear any existing timeout
+      function showToast(message, duration) {
+        duration = duration || 2000;
+        if (!toast || !toastText) return;
         if (toastTimeout) {
           clearTimeout(toastTimeout);
         }
-
-        // Update and show toast
         toastText.textContent = message;
         toast.classList.remove('hidden');
         toast.classList.add('show');
-
-        // Hide after duration
         toastTimeout = setTimeout(function() {
           toast.classList.remove('show');
           setTimeout(function() {
             toast.classList.add('hidden');
-          }, 300); // Wait for fade out animation
+          }, 300);
         }, duration);
       }
 
       function copyToClipboard(text, filename) {
-        // Try modern clipboard API first
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text)
             .then(function() {
@@ -209,7 +269,6 @@
       }
 
       function fallbackCopy(text, filename) {
-        // Fallback for older browsers
         const textarea = document.createElement('textarea');
         textarea.value = text;
         textarea.style.position = 'fixed';
@@ -234,7 +293,6 @@
         }
       }
 
-      // Add click handlers to all copy buttons
       copyButtons.forEach(function(button) {
         button.addEventListener('click', function(e) {
           e.preventDefault();
@@ -242,87 +300,13 @@
           const filename = this.getAttribute('data-filename');
           
           if (url) {
-            // Convert relative URL to absolute if needed
             const absoluteUrl = url.startsWith('http') ? url : window.location.origin + url;
             copyToClipboard(absoluteUrl, filename || absoluteUrl);
           }
         });
       });
     })();
-  </script>
-  <script>
-    // Delete confirmation - FIXED VERSION
-    (function() {
-      // Wait for DOM to be ready
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initDelete);
-      } else {
-        initDelete();
-      }
-
-      function initDelete() {
-        const deleteButtons = document.querySelectorAll('.delete-button');
-        
-        console.log('Found ' + deleteButtons.length + ' delete buttons');
-
-        deleteButtons.forEach(function(button) {
-          button.addEventListener('click', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const form = this.closest('form');
-            if (!form) {
-              console.error('No parent form found!');
-              alert('Error: Cannot find delete form');
-              return;
-            }
-
-            const filename = form.getAttribute('data-filename') || 'this file';
-            const action = form.getAttribute('action');
-            
-            console.log('Delete button clicked');
-            console.log('Filename: ' + filename);
-            console.log('Form action: ' + action);
-            console.log('Form method: ' + form.getAttribute('method'));
-
-            const confirmMsg = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
-            
-            if (window.confirm(confirmMsg)) {
-              console.log('User confirmed deletion');
-              
-              // Show loading state
-              const icon = this.querySelector('.icon');
-              if (icon) {
-                icon.textContent = '⏳';
-              }
-              this.disabled = true;
-              this.style.opacity = '0.5';
-              
-              console.log('Submitting form to: ' + action);
-              
-              // Submit the form
-              try {
-                form.submit();
-                console.log('Form submitted');
-              } catch (err) {
-                console.error('Error submitting form:', err);
-                alert('Error: ' + err.message);
-                
-                // Restore button
-                if (icon) {
-                  icon.textContent = '🗑️';
-                }
-                this.disabled = false;
-                this.style.opacity = '1';
-              }
-            } else {
-              console.log('User cancelled deletion');
-            }
-          });
-        });
-
-        console.log('Delete handlers attached');
-      }
-    })();
+    
+    console.log('All hosting page scripts loaded');
   </script>
 {% endblock %}
