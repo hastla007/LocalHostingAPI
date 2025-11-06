@@ -10,6 +10,7 @@ services:
       - data:/app/app/data
     environment:
       - PORT=8000
+      - SESSION_COOKIE_SECURE=false
 
 volumes:
   uploads:
