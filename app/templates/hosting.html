@@ -251,29 +251,45 @@
     })();
   </script>
   <script>
-    // Delete confirmation handler
-    (function() {
+    // Delete confirmation handler - FIXED VERSION
+    document.addEventListener('DOMContentLoaded', function() {
       const deleteForms = document.querySelectorAll('.delete-form');
+      
+      console.log('Found ' + deleteForms.length + ' delete forms');
 
-      deleteForms.forEach(function(form) {
+      deleteForms.forEach(function(form, index) {
         form.addEventListener('submit', function(e) {
+          e.preventDefault(); // Always prevent default first
+          e.stopPropagation(); // Prevent event bubbling
+          
           const filename = this.getAttribute('data-filename') || 'this file';
+          const confirmMessage = 'Delete "' + filename + '"?\n\nThis action cannot be undone.';
 
-          if (!confirm('Delete ' + filename + '? This action cannot be undone.')) {
-            e.preventDefault();
-            return false;
+          console.log('Delete clicked for: ' + filename);
+
+          if (window.confirm(confirmMessage)) {
+            console.log('User confirmed deletion');
+            
+            // Show visual feedback
+            const button = this.querySelector('button[type="submit"]');
+            if (button) {
+              button.disabled = true;
+              button.style.opacity = '0.5';
+              const icon = button.querySelector('.icon');
+              if (icon) {
+                icon.textContent = '⏳';
+              }
+            }
+            
+            // Actually submit the form
+            this.submit();
+          } else {
+            console.log('User cancelled deletion');
           }
-
-          // Optional: Show visual feedback
-          const button = this.querySelector('button[type="submit"]');
-          if (button) {
-            button.disabled = true;
-            button.style.opacity = '0.5';
-          }
-
-          return true;
+          
+          return false;
         });
       });
-    })();
+    });
   </script>
 {% endblock %}

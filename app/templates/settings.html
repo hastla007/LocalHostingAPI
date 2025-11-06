@@ -152,7 +152,7 @@
 
   <section class="card">
     <h2>Performance Settings</h2>
-    <form method="post" class="performance-form">
+    <form method="post" class="performance-form" id="performance-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
       <input type="hidden" name="action" value="update_performance" />
       <table class="settings-table">
@@ -167,8 +167,9 @@
                 id="max_upload_size_mb"
                 name="max_upload_size_mb"
                 min="1"
-                step="0.1"
-                value="{{ '%.1f'|format(performance_settings.max_upload_size_mb) }}"
+                max="10000"
+                step="1"
+                value="{{ performance_settings.max_upload_size_mb|int }}"
                 required
                 class="performance-input"
               />
@@ -184,6 +185,7 @@
                 id="max_concurrent_uploads"
                 name="max_concurrent_uploads"
                 min="1"
+                max="100"
                 step="1"
                 value="{{ performance_settings.max_concurrent_uploads }}"
                 required
@@ -201,6 +203,7 @@
                 id="cleanup_interval_minutes"
                 name="cleanup_interval_minutes"
                 min="1"
+                max="1440"
                 step="1"
                 value="{{ performance_settings.cleanup_interval_minutes }}"
                 required
@@ -218,6 +221,7 @@
                 id="upload_rate_limit_per_hour"
                 name="upload_rate_limit_per_hour"
                 min="1"
+                max="10000"
                 step="1"
                 value="{{ performance_settings.rate_limits.upload_per_hour }}"
                 required
@@ -235,6 +239,7 @@
                 id="login_rate_limit_per_minute"
                 name="login_rate_limit_per_minute"
                 min="1"
+                max="1000"
                 step="1"
                 value="{{ performance_settings.rate_limits.login_per_minute }}"
                 required
@@ -252,6 +257,7 @@
                 id="download_rate_limit_per_minute"
                 name="download_rate_limit_per_minute"
                 min="1"
+                max="10000"
                 step="1"
                 value="{{ performance_settings.rate_limits.download_per_minute }}"
                 required
@@ -262,7 +268,7 @@
         </tbody>
       </table>
       <div class="form-actions">
-        <button type="submit" class="button primary">Save Performance Settings</button>
+        <button type="submit" class="button primary" id="save-performance-btn">Save Performance Settings</button>
       </div>
     </form>
     <p class="form-help">
@@ -291,4 +297,73 @@
       can be edited directly through the dashboard.
     </p>
   </section>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    // Performance form validation and submission
+    document.addEventListener('DOMContentLoaded', function() {
+      const performanceForm = document.getElementById('performance-form');
+      const saveButton = document.getElementById('save-performance-btn');
+      
+      if (!performanceForm) {
+        console.error('Performance form not found');
+        return;
+      }
+      
+      console.log('Performance form found and ready');
+      
+      performanceForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        console.log('Performance form submitted');
+        
+        // Get all values
+        const formData = new FormData(this);
+        const values = {};
+        for (let [key, value] of formData.entries()) {
+          values[key] = value;
+          console.log(key + ': ' + value);
+        }
+        
+        // Validate all required fields are present
+        const requiredFields = [
+          'max_upload_size_mb',
+          'max_concurrent_uploads',
+          'cleanup_interval_minutes',
+          'upload_rate_limit_per_hour',
+          'login_rate_limit_per_minute',
+          'download_rate_limit_per_minute'
+        ];
+        
+        const missingFields = requiredFields.filter(function(field) {
+          return !values[field] || values[field] === '';
+        });
+        
+        if (missingFields.length > 0) {
+          alert('Please fill in all required fields: ' + missingFields.join(', '));
+          return false;
+        }
+        
+        // Validate numeric values
+        for (let field of requiredFields) {
+          const value = parseFloat(values[field]);
+          if (isNaN(value) || value < 1) {
+            alert(field.replace(/_/g, ' ') + ' must be a positive number');
+            return false;
+          }
+        }
+        
+        // Show visual feedback
+        if (saveButton) {
+          saveButton.disabled = true;
+          saveButton.textContent = 'Saving...';
+        }
+        
+        console.log('Form validation passed, submitting...');
+        
+        // Submit the form
+        this.submit();
+      });
+    });
+  </script>
 {% endblock %}
