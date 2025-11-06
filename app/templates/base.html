@@ -18,9 +18,9 @@
       </h1>
       <nav>
         <a href="{{ url_for('hosting') }}" class="{{ 'active' if request.endpoint == 'hosting' else '' }}">Hosting</a>
-        <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint in ('logs_page', 'logs_data') else '' }}">Logs</a>
-        <a href="{{ url_for('metrics') }}" class="{{ 'active' if request.endpoint == 'metrics' else '' }}">Metrics</a>
         <a href="{{ url_for('upload_file_page') }}" class="{{ 'active' if request.endpoint == 'upload_file_page' else '' }}">Upload File</a>
+        <a href="{{ url_for('metrics') }}" class="{{ 'active' if request.endpoint == 'metrics' else '' }}">Metrics</a>
+        <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint in ('logs_page', 'logs_data') else '' }}">Logs</a>
         <a href="{{ url_for('api_docs') }}" class="{{ 'active' if request.endpoint == 'api_docs' else '' }}">API Docs</a>
         <a href="{{ url_for('api_keys') }}" class="{{ 'active' if request.endpoint == 'api_keys' else '' }}">API Keys</a>
         <a href="{{ url_for('settings') }}" class="{{ 'active' if request.endpoint == 'settings' else '' }}">Settings</a>
@@ -48,8 +48,10 @@
       {% endwith %}
       {% block content %}{% endblock %}
     </main>
-    <footer>
-      <p class="love">Made with <i class="icon ion-heart"></i> for Your business. © 2025 LocalHostingAPI by Nowdoo Automations</p>
+    <footer class="site-footer">
+      <p class="site-footer-line">Made with <i class="icon ion-heart site-footer-heart" aria-hidden="true"></i> for Your Business &amp; Automations.</p>
+      <p class="site-footer-line">© 2025 LocalHostingAPI by Nowdoo.at</p>
+      <p class="site-footer-line site-footer-version">Version: 1.00.1</p>
     </footer>
     {% block scripts %}{% endblock %}
   </body>
