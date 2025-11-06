@@ -36,6 +36,11 @@ header h1 a.logo {
 }
 
 header h1 .logo-local {
+  color: #9ca3af;
+  font-weight: 700;
+}
+
+header h1 .logo-hosting {
   color: #f97316;
   font-weight: 700;
 }
