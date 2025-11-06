@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 from xml.etree import ElementTree as ET
 
 from werkzeug.security import check_password_hash
@@ -458,6 +458,53 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"File not found.", response.data)
+
+    def test_delete_redirect_preserves_table_filters(self):
+        uploads = []
+        for name in ("report-one.txt", "report-two.txt"):
+            upload_response = self.client.post(
+                "/fileupload",
+                data={
+                    "file": (io.BytesIO(f"payload-{name}".encode()), name),
+                    "retention_hours": "2",
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(upload_response.status_code, 201)
+            uploads.append(upload_response.get_json()["id"])
+
+        delete_response = self.client.post(
+            f"/hosting/delete/{uploads[0]}",
+            data={
+                "page": "2",
+                "per_page": "1",
+                "sort": "uploaded_at",
+                "order": "desc",
+                "search": "report",
+            },
+            follow_redirects=False,
+        )
+
+        self.assertEqual(delete_response.status_code, 302)
+        location = delete_response.headers.get("Location")
+        self.assertIsNotNone(location)
+        self.assertTrue(location.startswith("/hosting"))
+
+        parsed = urlparse(location)
+        params = dict(parse_qsl(parsed.query))
+        self.assertEqual(params.get("sort"), "uploaded_at")
+        self.assertEqual(params.get("order"), "desc")
+        self.assertEqual(params.get("per_page"), "1")
+        self.assertEqual(params.get("search"), "report")
+        self.assertEqual(params.get("page"), "1")
+
+        follow_response = self.client.get(location)
+        self.assertEqual(follow_response.status_code, 200)
+        body = follow_response.data.decode()
+        self.assertIn("File deleted successfully.", body)
+        self.assertNotIn("report-one.txt", body)
+        self.assertIn("report-two.txt", body)
+        self.assertIsNone(self.storage.get_file(uploads[0]))
 
     def test_navigation_includes_logs_link(self):
         response = self.client.get("/hosting")

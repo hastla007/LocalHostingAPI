@@ -1805,6 +1805,28 @@ def logs_data():
 @app.route("/hosting/delete/<file_id>", methods=["POST"])
 @require_ui_auth
 def hosting_delete(file_id: str):
+    search_term = (request.form.get("search") or "").strip()
+
+    sort_by = request.form.get("sort", "uploaded_at")
+    if sort_by not in {"name", "size", "uploaded_at", "expires_at"}:
+        sort_by = "uploaded_at"
+
+    sort_order = (request.form.get("order") or "desc").lower()
+    if sort_order not in {"asc", "desc"}:
+        sort_order = "desc"
+
+    try:
+        per_page = int(request.form.get("per_page", 50))
+    except (TypeError, ValueError):
+        per_page = 50
+    per_page = max(1, min(per_page, 200))
+
+    try:
+        page = int(request.form.get("page", 1))
+    except (TypeError, ValueError):
+        page = 1
+    page = max(page, 1)
+
     if delete_file(file_id):
         flash("File deleted successfully.", "success")
         lifecycle_logger.info(
@@ -1821,7 +1843,22 @@ def hosting_delete(file_id: str):
             sanitize_log_value(session.get("ui_username", "anonymous")),
             request.remote_addr or "unknown",
         )
-    return redirect(url_for("hosting"))
+
+    total_files = count_files(search_term=search_term or None)
+    total_pages = max(1, math.ceil(total_files / per_page)) if total_files else 1
+    if page > total_pages:
+        page = total_pages
+
+    redirect_params = {
+        "page": page,
+        "per_page": per_page,
+        "sort": sort_by,
+        "order": sort_order,
+    }
+    if search_term:
+        redirect_params["search"] = search_term
+
+    return redirect(url_for("hosting", **redirect_params))
 
 
 @app.route("/settings", methods=["GET", "POST"])

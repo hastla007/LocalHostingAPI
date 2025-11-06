@@ -110,6 +110,11 @@
                 {% endif %}
                 <form method="post" action="{{ url_for('hosting_delete', file_id=file.id) }}" class="inline-form" onsubmit="return confirm('Delete this file?');">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="page" value="{{ page }}" />
+                  <input type="hidden" name="per_page" value="{{ per_page }}" />
+                  <input type="hidden" name="sort" value="{{ sort_by }}" />
+                  <input type="hidden" name="order" value="{{ sort_order }}" />
+                  <input type="hidden" name="search" value="{{ search }}" />
                   <button
                     type="submit"
                     class="button danger icon-only"
