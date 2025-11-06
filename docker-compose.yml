@@ -5,7 +5,7 @@ services:
     build: .
     container_name: localhostingapi
     ports:
-      - "8000:8000"
+      - "3003:8000"
     volumes:
       - uploads:/app/app/uploads
       - data:/app/app/data
