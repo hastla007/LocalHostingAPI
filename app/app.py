@@ -3800,6 +3800,137 @@ def s3_put_object(bucket: str, key: str):
     return response
 
 
+@app.route("/metrics")
+@require_ui_auth
+def metrics():
+    """Display comprehensive system and usage metrics."""
+
+    storage_stats = get_storage_statistics()
+
+    health_checks: Dict[str, Dict[str, Any]] = {}
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+            health_checks["database"] = {"status": "healthy", "message": "Connected"}
+    except Exception as error:
+        health_checks["database"] = {
+            "status": "unhealthy",
+            "message": str(error)[:100],
+        }
+
+    try:
+        usage = shutil.disk_usage(UPLOADS_DIR)
+        disk_free_gb = usage.free / (1024 ** 3)
+        disk_total_gb = usage.total / (1024 ** 3)
+        disk_used_gb = usage.used / (1024 ** 3)
+        disk_percent = (usage.used / usage.total * 100) if usage.total > 0 else 0
+        health_checks["disk"] = {
+            "status": "healthy"
+            if disk_free_gb >= 5
+            else ("warning" if disk_free_gb >= 1 else "critical"),
+            "free_gb": disk_free_gb,
+            "total_gb": disk_total_gb,
+            "used_gb": disk_used_gb,
+            "percent_used": disk_percent,
+        }
+    except Exception as error:
+        health_checks["disk"] = {
+            "status": "unhealthy",
+            "message": str(error)[:100],
+        }
+
+    health_checks["upload_limiter"] = {
+        "status": "healthy",
+        "current_limit": upload_limiter.current_limit,
+        "available_slots": upload_limiter.available_slots(),
+    }
+
+    recent_uploads = list_files(
+        limit=20, offset=0, sort_by="uploaded_at", sort_order="desc"
+    )
+    recent_files: List[Dict[str, Any]] = []
+    now = time.time()
+    for record in recent_uploads:
+        is_permanent = bool(record["permanent"]) if "permanent" in record.keys() else False
+        expires_at = float(record["expires_at"])
+        remaining_seconds = float("inf") if is_permanent else max(expires_at - now, 0)
+        recent_files.append(
+            {
+                "id": record["id"],
+                "original_name": record["original_name"],
+                "size": record["size"],
+                "uploaded_at": record["uploaded_at"],
+                "expires_at": expires_at,
+                "permanent": is_permanent,
+                "remaining_seconds": remaining_seconds,
+            }
+        )
+
+    retention_breakdown = {
+        "permanent": 0,
+        "less_1h": 0,
+        "1h_to_6h": 0,
+        "6h_to_24h": 0,
+        "1d_to_7d": 0,
+        "more_7d": 0,
+    }
+
+    current_time = time.time()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT expires_at, permanent FROM files WHERE expires_at >= ?",
+            (current_time,),
+        )
+        for row in cursor:
+            if row["permanent"]:
+                retention_breakdown["permanent"] += 1
+                continue
+
+            hours_remaining = (row["expires_at"] - current_time) / 3600
+            if hours_remaining < 1:
+                retention_breakdown["less_1h"] += 1
+            elif hours_remaining < 6:
+                retention_breakdown["1h_to_6h"] += 1
+            elif hours_remaining < 24:
+                retention_breakdown["6h_to_24h"] += 1
+            elif hours_remaining < 168:
+                retention_breakdown["1d_to_7d"] += 1
+            else:
+                retention_breakdown["more_7d"] += 1
+
+    config = get_config()
+    config_snapshot = {
+        "retention_hours": config.get("retention_hours", 24),
+        "retention_min_hours": config.get("retention_min_hours", 0),
+        "retention_max_hours": config.get("retention_max_hours", 168),
+        "max_upload_size_mb": config.get("max_upload_size_mb", 500),
+        "max_concurrent_uploads": int(config.get("max_concurrent_uploads", 10)),
+        "cleanup_interval_minutes": int(config.get("cleanup_interval_minutes", 5)),
+        "ui_auth_enabled": config.get("ui_auth_enabled", False),
+        "api_auth_enabled": config.get("api_auth_enabled", False),
+        "api_keys_count": len(config.get("api_keys", [])),
+    }
+
+    quota_limit_gb = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
+    if quota_limit_gb and quota_limit_gb > 0:
+        quota_used_percent = (
+            storage_stats["total_bytes"] / (quota_limit_gb * 1024 ** 3) * 100
+        )
+    else:
+        quota_used_percent = None
+
+    return render_template(
+        "metrics.html",
+        storage_stats=storage_stats,
+        health_checks=health_checks,
+        recent_files=recent_files,
+        retention_breakdown=retention_breakdown,
+        config_snapshot=config_snapshot,
+        quota_limit_gb=quota_limit_gb,
+        quota_used_percent=quota_used_percent,
+    )
+
+
 @app.errorhandler(404)
 def not_found(error):
     return render_template("404.html"), 404

@@ -1160,3 +1160,214 @@ footer {
     max-width: none;
   }
 }
+/* Metrics Page Styles */
+.metrics-subtitle {
+  margin: 0.5rem 0 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.metric-card h3 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.metric-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+.metric-stat {
+  text-align: center;
+  padding: 0.75rem;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.metric-label {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+}
+
+.metric-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.metric-progress {
+  margin-top: 1.5rem;
+}
+
+.progress-label {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+}
+
+.progress-text {
+  font-size: 0.85rem;
+  color: #4b5563;
+  margin-top: 0.5rem;
+  text-align: center;
+}
+
+.health-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.health-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: #f9fafb;
+  border-radius: 6px;
+}
+
+.health-label {
+  font-weight: 600;
+  color: #374151;
+}
+
+.health-status {
+  font-size: 0.9rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.health-status.healthy {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.health-status.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.health-status.critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.health-status.unhealthy {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.retention-breakdown {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+}
+
+.retention-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: #f9fafb;
+  border-radius: 6px;
+}
+
+.retention-label {
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+.retention-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.config-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: #f9fafb;
+  border-radius: 6px;
+}
+
+.config-label {
+  font-size: 0.9rem;
+  color: #4b5563;
+}
+
+.config-value {
+  font-weight: 600;
+  color: #111827;
+}
+
+.metrics-table {
+  margin-top: 1rem;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.status-badge.active {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.status-badge.permanent {
+  background: #dcfce7;
+  color: #166534;
+}
+
+@media (prefers-color-scheme: dark) {
+  .metric-stat,
+  .health-item,
+  .retention-item,
+  .config-item {
+    background: #1e293b;
+  }
+
+  .metric-label,
+  .health-label,
+  .retention-label,
+  .config-label {
+    color: #cbd5f5;
+  }
+
+  .metric-value,
+  .retention-value,
+  .config-value {
+    color: #e2e8f0;
+  }
+
+  .metrics-subtitle {
+    color: #cbd5f5;
+  }
+}
