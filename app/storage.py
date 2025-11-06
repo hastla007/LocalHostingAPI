@@ -34,6 +34,10 @@ LOGS_DIR = _resolve_env_path("LOCALHOSTING_LOGS_DIR", STORAGE_ROOT / "logs")
 DB_PATH = DATA_DIR / "files.db"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+# Sentinel timestamp used to represent permanent retention. The value is far in
+# the future while remaining within SQLite's supported REAL precision.
+PERMANENT_EXPIRATION = 9_999_999_999.0
+
 def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
@@ -355,6 +359,24 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_files_expires_at ON files(expires_at)"
         )
         conn.commit()
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
+        )
+        conn.commit()
+
+
+def migrate_permanent_storage():
+    """Add permanent column to files table if it doesn't exist."""
+    with get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+        if "permanent" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
+            conn.commit()
+            logger.info("Added permanent column to files table")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
+        )
+        conn.commit()
 
 
 def migrate_permanent_storage():
@@ -490,7 +512,11 @@ def register_file(
 ) -> str:
     file_id = file_id or str(uuid.uuid4())
     uploaded_at = time.time()
-    expires_at = 9999999999.0 if permanent else calculate_expiration(retention_hours)
+    expires_at = (
+        PERMANENT_EXPIRATION
+        if permanent
+        else calculate_expiration(retention_hours)
+    )
     direct_path: Optional[str] = None
     max_attempts = 5
 
@@ -512,7 +538,17 @@ def register_file(
                 )
                 conn.execute(
                     """
-                    INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at, direct_path, permanent)
+                    INSERT INTO files (
+                        id,
+                        original_name,
+                        stored_name,
+                        content_type,
+                        size,
+                        uploaded_at,
+                        expires_at,
+                        direct_path,
+                        permanent
+                    )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -556,8 +592,17 @@ def register_file(
                             conn.execute("BEGIN IMMEDIATE")
                             conn.execute(
                                 """
-                                INSERT INTO files (id, original_name, stored_name, content_type, size, uploaded_at, expires_at,
-direct_path, permanent)
+                                INSERT INTO files (
+                                    id,
+                                    original_name,
+                                    stored_name,
+                                    content_type,
+                                    size,
+                                    uploaded_at,
+                                    expires_at,
+                                    direct_path,
+                                    permanent
+                                )
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 base_params[:-1] + (fallback_candidate, base_params[-1]),
