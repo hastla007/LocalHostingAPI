@@ -352,6 +352,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             "/settings",
             data={
                 "action": "update_performance",
+                "max_upload_size_mb": "512",
                 "max_concurrent_uploads": "7",
                 "cleanup_interval_minutes": "9",
                 "upload_rate_limit_per_hour": "75",
@@ -364,11 +365,12 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertIn(b"Performance settings updated", response.data)
 
         config = self.app_module.get_config()
-        self.assertEqual(config["max_concurrent_uploads"], 7.0)
-        self.assertEqual(config["cleanup_interval_minutes"], 9.0)
-        self.assertEqual(config["upload_rate_limit_per_hour"], 75.0)
-        self.assertEqual(config["login_rate_limit_per_minute"], 6.0)
-        self.assertEqual(config["download_rate_limit_per_minute"], 80.0)
+        self.assertEqual(config["max_upload_size_mb"], 512.0)
+        self.assertEqual(config["max_concurrent_uploads"], 7)
+        self.assertEqual(config["cleanup_interval_minutes"], 9)
+        self.assertEqual(config["upload_rate_limit_per_hour"], 75)
+        self.assertEqual(config["login_rate_limit_per_minute"], 6)
+        self.assertEqual(config["download_rate_limit_per_minute"], 80)
 
         self.assertEqual(self.app_module.max_concurrent_uploads_setting, 7)
         limiter = self.app_module.upload_limiter
