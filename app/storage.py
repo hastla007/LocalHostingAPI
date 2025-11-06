@@ -365,27 +365,24 @@ def init_db() -> None:
         conn.commit()
 
 
-def migrate_permanent_storage():
-    """Add permanent column to files table if it doesn't exist."""
+def migrate_permanent_storage() -> None:
+    """Ensure the files table has the permanent column and related index."""
+
     with get_db() as conn:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+        added_column = False
+
         if "permanent" not in columns:
             conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
-            conn.commit()
-            logger.info("Added permanent column to files table")
+            added_column = True
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
         )
+
         conn.commit()
 
-
-def migrate_permanent_storage():
-    """Add permanent column to files table if it doesn't exist."""
-    with get_db() as conn:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
-        if "permanent" not in columns:
-            conn.execute("ALTER TABLE files ADD COLUMN permanent INTEGER DEFAULT 0")
-            conn.commit()
+        if added_column:
             logger.info("Added permanent column to files table")
 
 
