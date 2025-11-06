@@ -97,6 +97,16 @@ CONFIG_STRING_KEYS = {"ui_username", "ui_password_hash", "api_ui_key_id"}
 CONFIG_LIST_KEYS = {"api_keys"}
 
 
+def get_config_mtime() -> float:
+    """Return the last modified timestamp for the persisted config file."""
+
+    ensure_directories()
+    try:
+        return CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _coerce_numeric(value, default):
     try:
         coerced = float(value)
@@ -727,28 +737,40 @@ def delete_file(file_id: str) -> bool:
     record = get_file(file_id)
     if not record:
         return False
+
     stored_name = record["stored_name"]
     file_path = get_storage_path(file_id, stored_name)
-    try:
-        with get_db() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
-            if cursor.rowcount == 0:
-                conn.rollback()
-                return False
-            if file_path.exists():
-                try:
-                    file_path.unlink()
-                except OSError as error:
-                    logger.warning(
-                        "file_delete_disk_failed file_id=%s path=%s error=%s",
-                        file_id,
-                        file_path,
-                        error,
-                    )
-                    raise RuntimeError("disk_delete_failed") from error
-    except RuntimeError:
-        return False
+
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return False
+
+    removed_from_disk = False
+    if file_path.exists():
+        try:
+            file_path.unlink()
+            removed_from_disk = True
+            prune_empty_upload_dirs(file_path.parent)
+        except OSError as error:
+            logger.warning(
+                "file_delete_disk_failed file_id=%s path=%s error=%s",
+                file_id,
+                file_path,
+                error,
+            )
+    else:
+        removed_from_disk = True
+
+    if not removed_from_disk:
+        logger.warning(
+            "file_delete_disk_residual file_id=%s path=%s",
+            file_id,
+            file_path,
+        )
+
     logger.info(
         "file_deleted file_id=%s stored_name=%s original_name=%s",
         file_id,
