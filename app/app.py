@@ -866,23 +866,15 @@ def render_settings_page(config: Dict[str, Any]):
 
     storage_quota_limit = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
 
+    # Ensure all numeric values are properly formatted
     performance_settings = {
-        "max_concurrent_uploads": _coerce_positive_int(
-            config.get("max_concurrent_uploads"), max_concurrent_uploads_setting or 10
-        ),
-        "cleanup_interval_minutes": _coerce_positive_int(
-            config.get("cleanup_interval_minutes"), cleanup_interval_minutes_setting or 5
-        ),
+        "max_upload_size_mb": float(config.get("max_upload_size_mb", 500)),
+        "max_concurrent_uploads": int(float(config.get("max_concurrent_uploads", 10))),
+        "cleanup_interval_minutes": int(float(config.get("cleanup_interval_minutes", 5))),
         "rate_limits": {
-            "upload_per_hour": _coerce_positive_int(
-                config.get("upload_rate_limit_per_hour"), 100
-            ),
-            "login_per_minute": _coerce_positive_int(
-                config.get("login_rate_limit_per_minute"), 10
-            ),
-            "download_per_minute": _coerce_positive_int(
-                config.get("download_rate_limit_per_minute"), 120
-            ),
+            "upload_per_hour": int(float(config.get("upload_rate_limit_per_hour", 100))),
+            "login_per_minute": int(float(config.get("login_rate_limit_per_minute", 10))),
+            "download_per_minute": int(float(config.get("download_rate_limit_per_minute", 120))),
         },
     }
 
@@ -1891,12 +1883,9 @@ def settings():
             flash("Retention settings updated.", "success")
 
         elif action == "update_performance":
-            upload_limit_input = request.form.get("max_upload_size_mb")
-            current_limit_mb = config.get("max_upload_size_mb") or (
-                app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024) / (1024 * 1024)
-            )
-
-            field_map = {
+            # Get all field values
+            field_inputs = {
+                "max_upload_size_mb": request.form.get("max_upload_size_mb"),
                 "max_concurrent_uploads": request.form.get("max_concurrent_uploads"),
                 "cleanup_interval_minutes": request.form.get("cleanup_interval_minutes"),
                 "upload_rate_limit_per_hour": request.form.get("upload_rate_limit_per_hour"),
@@ -1904,57 +1893,111 @@ def settings():
                 "download_rate_limit_per_minute": request.form.get("download_rate_limit_per_minute"),
             }
 
+            max_upload_input = field_inputs.pop("max_upload_size_mb")
+
+            # Validate all fields are present
+            missing_fields = [key for key, value in field_inputs.items() if value in (None, "")]
+            if missing_fields:
+                flash(f"Missing required fields: {', '.join(missing_fields)}", "error")
+                proposed = deepcopy(config)
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
+                if max_upload_input not in (None, ""):
+                    try:
+                        proposed["max_upload_size_mb"] = float(max_upload_input)
+                    except (TypeError, ValueError):
+                        proposed["max_upload_size_mb"] = max_upload_input
+                return render_settings_page(proposed)
+
+            # Parse and validate maximum upload size
             try:
-                parsed_values: Dict[str, int] = {}
-                for key, value in field_map.items():
-                    if value in (None, ""):
-                        raise ValueError
-                    parsed = int(float(value))
-                    if parsed < 1:
-                        raise ValueError
-                    parsed_values[key] = parsed
-
-                if upload_limit_input in (None, ""):
-                    upload_limit_mb = float(current_limit_mb)
+                if max_upload_input in (None, ""):
+                    upload_size_mb = float(config.get("max_upload_size_mb", 500))
                 else:
-                    upload_limit_mb = float(upload_limit_input)
+                    upload_size_mb = float(max_upload_input)
             except (TypeError, ValueError):
-                flash("Please provide valid positive numbers for performance settings.", "error")
+                flash("Please provide a valid number for maximum upload size.", "error")
                 proposed = deepcopy(config)
-                for key, raw_value in field_map.items():
-                    if raw_value is not None:
-                        proposed[key] = raw_value
-                if upload_limit_input is not None:
-                    proposed["max_upload_size_mb"] = upload_limit_input
+                if max_upload_input not in (None, ""):
+                    proposed["max_upload_size_mb"] = max_upload_input
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
                 return render_settings_page(proposed)
 
-            if upload_limit_mb < 1:
-                flash("Maximum upload size must be at least 1 MB.", "error")
+            if upload_size_mb < 1:
+                flash("Maximum upload size must be at least 1.", "error")
                 proposed = deepcopy(config)
-                proposed["max_upload_size_mb"] = upload_limit_input
-                for key, raw_value in field_map.items():
-                    if raw_value is not None:
-                        proposed[key] = raw_value
+                proposed["max_upload_size_mb"] = upload_size_mb
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
                 return render_settings_page(proposed)
 
+            # Parse and validate remaining values
+            try:
+                parsed_values = {}
+                for key, value in field_inputs.items():
+                    parsed = float(value)
+                    if parsed < 1:
+                        flash(f"{key.replace('_', ' ').title()} must be at least 1.", "error")
+                        proposed = deepcopy(config)
+                        for k, v in field_inputs.items():
+                            if v is not None:
+                                try:
+                                    proposed[k] = float(v)
+                                except (TypeError, ValueError):
+                                    pass
+                        proposed["max_upload_size_mb"] = upload_size_mb
+                        return render_settings_page(proposed)
+                    # Store as appropriate type
+                    if key in {"max_concurrent_uploads", "cleanup_interval_minutes",
+                               "upload_rate_limit_per_hour", "login_rate_limit_per_minute",
+                               "download_rate_limit_per_minute"}:
+                        parsed_values[key] = int(parsed)
+                    else:
+                        parsed_values[key] = parsed
+            except (TypeError, ValueError) as e:
+                flash("Please provide valid positive numbers for all performance settings.", "error")
+                proposed = deepcopy(config)
+                for key, value in field_inputs.items():
+                    if value is not None:
+                        try:
+                            proposed[key] = float(value)
+                        except (TypeError, ValueError):
+                            pass
+                proposed["max_upload_size_mb"] = upload_size_mb
+                return render_settings_page(proposed)
+
+            # Save the config
             proposed = deepcopy(config)
+            parsed_values["max_upload_size_mb"] = upload_size_mb
             proposed.update(parsed_values)
-            proposed["max_upload_size_mb"] = upload_limit_mb
 
             save_config(proposed)
             get_config(refresh=True)
             refreshed = True
 
             lifecycle_logger.info(
-                "performance_settings_updated max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d upload_limit=%.2f",
-                parsed_values["max_concurrent_uploads"],
-                parsed_values["cleanup_interval_minutes"],
-                parsed_values["upload_rate_limit_per_hour"],
-                parsed_values["login_rate_limit_per_minute"],
-                parsed_values["download_rate_limit_per_minute"],
-                upload_limit_mb,
+                "performance_settings_updated max_upload_size=%.2f max_concurrent=%d cleanup_interval=%d upload_rate=%d login_rate=%d download_rate=%d",
+                parsed_values.get("max_upload_size_mb", 0),
+                parsed_values.get("max_concurrent_uploads", 0),
+                parsed_values.get("cleanup_interval_minutes", 0),
+                parsed_values.get("upload_rate_limit_per_hour", 0),
+                parsed_values.get("login_rate_limit_per_minute", 0),
+                parsed_values.get("download_rate_limit_per_minute", 0),
             )
-            flash("Performance settings updated.", "success")
+            flash("Performance settings updated successfully.", "success")
 
         elif action == "update_ui_auth":
             auth_enabled = request.form.get("ui_auth_enabled") == "on"
@@ -2316,27 +2359,46 @@ def fileupload():
                 )
                 return jsonify({"error": "Storage quota exceeded"}), 507
         payload = request.get_json(silent=True) if request.is_json else None
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.form.get("retention_hours"),
-                request.args.get("retention_hours"),
-                (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
-            )
-        except RetentionValidationError as error:
-            allowed_range = error.allowed_range or [
-                config["retention_min_hours"],
-                config["retention_max_hours"],
-            ]
-            app.logger.warning(
-                "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
-                request.form.get("retention_hours")
-                or request.args.get("retention_hours")
-                or (payload or {}).get("retention_hours"),
-                allowed_range[0],
-                allowed_range[1],
-            )
-            return jsonify(error.to_payload()), 400
+
+        permanent = False
+        permanent_candidates = [
+            request.form.get("permanent"),
+            request.args.get("permanent"),
+            (payload or {}).get("permanent") if isinstance(payload, dict) else None,
+        ]
+        for candidate in permanent_candidates:
+            if candidate is None:
+                continue
+            if isinstance(candidate, str):
+                permanent = candidate.lower() in {"1", "true", "yes", "on"}
+            else:
+                permanent = bool(candidate)
+            break
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.form.get("retention_hours"),
+                    request.args.get("retention_hours"),
+                    (payload or {}).get("retention_hours") if isinstance(payload, dict) else None,
+                )
+            except RetentionValidationError as error:
+                allowed_range = error.allowed_range or [
+                    config["retention_min_hours"],
+                    config["retention_max_hours"],
+                ]
+                app.logger.warning(
+                    "upload_failed reason=retention_invalid value=%s min=%.2f max=%.2f",
+                    request.form.get("retention_hours")
+                    or request.args.get("retention_hours")
+                    or (payload or {}).get("retention_hours"),
+                    allowed_range[0],
+                    allowed_range[1],
+                )
+                return jsonify(error.to_payload()), 400
+        else:
+            retention_hours = 0
 
         results = []
         failures: List[Dict[str, str]] = []
@@ -2394,6 +2456,7 @@ def fileupload():
                                 size=size,
                                 retention_hours=retention_hours,
                                 file_id=file_id,
+                                permanent=permanent,
                             )
                     except StorageQuotaExceededError as quota_error:
                         if upload_path.exists():
@@ -2478,10 +2541,13 @@ def fileupload():
                     "filename": filename,
                     "size": size,
                     "download_url": download_url,
-                    "retention_hours": retention_hours,
+                    "retention_hours": retention_hours if not permanent else None,
+                    "permanent": permanent,
                     "uploaded_at": uploaded_at,
                     "expires_at": expires_at,
-                    "expires_at_iso": isoformat_utc(expires_at),
+                    "expires_at_iso": isoformat_utc(expires_at)
+                    if not permanent
+                    else None,
                     "direct_download_url": direct_download_url,
                     "raw_download_url": raw_download_url,
                     "raw_download_path": record["direct_path"],
@@ -2520,7 +2586,8 @@ def fileupload():
         response_payload: Dict[str, object] = {
             "message": f"Uploaded {len(results)} files successfully.",
             "files": results,
-            "retention_hours": retention_hours,
+            "retention_hours": retention_hours if not permanent else None,
+            "permanent": permanent,
         }
         return jsonify(response_payload), 201
 
@@ -2656,22 +2723,32 @@ def box_upload_files():
             ),
         )
 
-        try:
-            retention_hours = resolve_retention(config, *retention_candidates)
-        except RetentionValidationError as error:
-            allowed_range = error.allowed_range or [
-                config["retention_min_hours"],
-                config["retention_max_hours"],
-            ]
-            lifecycle_logger.warning(
-                "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
-                allowed_range[0],
-                allowed_range[1],
-            )
-            context = {
-                "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
-            }
-            return _box_error("retention_invalid", str(error), context=context)
+        permanent_header = request.headers.get("X-Localhosting-Permanent")
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(config, *retention_candidates)
+            except RetentionValidationError as error:
+                allowed_range = error.allowed_range or [
+                    config["retention_min_hours"],
+                    config["retention_max_hours"],
+                ]
+                lifecycle_logger.warning(
+                    "box_upload_failed reason=retention_invalid min=%.2f max=%.2f",
+                    allowed_range[0],
+                    allowed_range[1],
+                )
+                context = {
+                    "allowed_range": f"{allowed_range[0]:.2f}-{allowed_range[1]:.2f}",
+                }
+                return _box_error("retention_invalid", str(error), context=context)
+        else:
+            retention_hours = 0
 
         quota_limit_bytes = storage_quota_limit_bytes()
         if quota_limit_bytes is not None:
@@ -2820,6 +2897,7 @@ def box_upload_files():
                         size=size,
                         retention_hours=retention_hours,
                         file_id=file_id,
+                        permanent=permanent,
                     )
             except StorageQuotaExceededError as quota_error:
                 if upload_path.exists():
@@ -3304,27 +3382,39 @@ def s3_multipart_upload(bucket: str):
 
         content_type = content_type or upload.content_type
 
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.form.get("x-amz-meta-retention-hours"),
-                request.headers.get("x-amz-meta-retention-hours"),
-                request.args.get("retentionHours"),
-            )
-        except RetentionValidationError as error:
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s",
-                bucket,
-                sanitize_log_value(key),
-            )
-            return _s3_error_response(
-                "InvalidRequest",
-                str(error),
-                bucket=bucket,
-                key=key,
-            )
+        permanent_header = request.form.get("x-amz-meta-permanent") or request.headers.get(
+            "x-amz-meta-permanent"
+        )
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.form.get("x-amz-meta-retention-hours"),
+                    request.headers.get("x-amz-meta-retention-hours"),
+                    request.args.get("retentionHours"),
+                )
+            except RetentionValidationError as error:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                lifecycle_logger.warning(
+                    "s3_upload_retention_invalid bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InvalidRequest",
+                    str(error),
+                    bucket=bucket,
+                    key=key,
+                )
+        else:
+            retention_hours = 0
 
         try:
             with quota_lock:
@@ -3336,6 +3426,7 @@ def s3_multipart_upload(bucket: str):
                     size=size,
                     retention_hours=retention_hours,
                     file_id=file_id,
+                    permanent=permanent,
                 )
         except StorageQuotaExceededError as quota_error:
             if upload_path.exists():
@@ -3548,26 +3639,36 @@ def s3_put_object(bucket: str, key: str):
                 status_code=500,
             )
 
-        try:
-            retention_hours = resolve_retention(
-                config,
-                request.headers.get("x-amz-meta-retention-hours"),
-                request.args.get("retentionHours"),
-            )
-        except RetentionValidationError as error:
-            upload_path.unlink(missing_ok=True)
-            prune_empty_upload_dirs(upload_path.parent)
-            lifecycle_logger.warning(
-                "s3_upload_retention_invalid bucket=%s key=%s",
-                bucket,
-                sanitize_log_value(key),
-            )
-            return _s3_error_response(
-                "InvalidRequest",
-                str(error),
-                bucket=bucket,
-                key=key,
-            )
+        permanent_header = request.headers.get("x-amz-meta-permanent")
+        permanent = (
+            permanent_header.lower() in {"1", "true", "yes", "on"}
+            if isinstance(permanent_header, str) and permanent_header
+            else False
+        )
+
+        if not permanent:
+            try:
+                retention_hours = resolve_retention(
+                    config,
+                    request.headers.get("x-amz-meta-retention-hours"),
+                    request.args.get("retentionHours"),
+                )
+            except RetentionValidationError as error:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                lifecycle_logger.warning(
+                    "s3_upload_retention_invalid bucket=%s key=%s",
+                    bucket,
+                    sanitize_log_value(key),
+                )
+                return _s3_error_response(
+                    "InvalidRequest",
+                    str(error),
+                    bucket=bucket,
+                    key=key,
+                )
+        else:
+            retention_hours = 0
 
         original_name = (
             request.headers.get("x-amz-meta-original-filename")
@@ -3613,6 +3714,7 @@ def s3_put_object(bucket: str, key: str):
                     size=size,
                     retention_hours=retention_hours,
                     file_id=file_id,
+                    permanent=permanent,
                 )
         except StorageQuotaExceededError as quota_error:
             if upload_path.exists():
@@ -3696,6 +3798,137 @@ def s3_put_object(bucket: str, key: str):
     )
     response.headers["x-localhosting-file-id"] = file_id
     return response
+
+
+@app.route("/metrics")
+@require_ui_auth
+def metrics():
+    """Display comprehensive system and usage metrics."""
+
+    storage_stats = get_storage_statistics()
+
+    health_checks: Dict[str, Dict[str, Any]] = {}
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+            health_checks["database"] = {"status": "healthy", "message": "Connected"}
+    except Exception as error:
+        health_checks["database"] = {
+            "status": "unhealthy",
+            "message": str(error)[:100],
+        }
+
+    try:
+        usage = shutil.disk_usage(UPLOADS_DIR)
+        disk_free_gb = usage.free / (1024 ** 3)
+        disk_total_gb = usage.total / (1024 ** 3)
+        disk_used_gb = usage.used / (1024 ** 3)
+        disk_percent = (usage.used / usage.total * 100) if usage.total > 0 else 0
+        health_checks["disk"] = {
+            "status": "healthy"
+            if disk_free_gb >= 5
+            else ("warning" if disk_free_gb >= 1 else "critical"),
+            "free_gb": disk_free_gb,
+            "total_gb": disk_total_gb,
+            "used_gb": disk_used_gb,
+            "percent_used": disk_percent,
+        }
+    except Exception as error:
+        health_checks["disk"] = {
+            "status": "unhealthy",
+            "message": str(error)[:100],
+        }
+
+    health_checks["upload_limiter"] = {
+        "status": "healthy",
+        "current_limit": upload_limiter.current_limit,
+        "available_slots": upload_limiter.available_slots(),
+    }
+
+    recent_uploads = list_files(
+        limit=20, offset=0, sort_by="uploaded_at", sort_order="desc"
+    )
+    recent_files: List[Dict[str, Any]] = []
+    now = time.time()
+    for record in recent_uploads:
+        is_permanent = bool(record["permanent"]) if "permanent" in record.keys() else False
+        expires_at = float(record["expires_at"])
+        remaining_seconds = float("inf") if is_permanent else max(expires_at - now, 0)
+        recent_files.append(
+            {
+                "id": record["id"],
+                "original_name": record["original_name"],
+                "size": record["size"],
+                "uploaded_at": record["uploaded_at"],
+                "expires_at": expires_at,
+                "permanent": is_permanent,
+                "remaining_seconds": remaining_seconds,
+            }
+        )
+
+    retention_breakdown = {
+        "permanent": 0,
+        "less_1h": 0,
+        "1h_to_6h": 0,
+        "6h_to_24h": 0,
+        "1d_to_7d": 0,
+        "more_7d": 0,
+    }
+
+    current_time = time.time()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT expires_at, permanent FROM files WHERE expires_at >= ?",
+            (current_time,),
+        )
+        for row in cursor:
+            if row["permanent"]:
+                retention_breakdown["permanent"] += 1
+                continue
+
+            hours_remaining = (row["expires_at"] - current_time) / 3600
+            if hours_remaining < 1:
+                retention_breakdown["less_1h"] += 1
+            elif hours_remaining < 6:
+                retention_breakdown["1h_to_6h"] += 1
+            elif hours_remaining < 24:
+                retention_breakdown["6h_to_24h"] += 1
+            elif hours_remaining < 168:
+                retention_breakdown["1d_to_7d"] += 1
+            else:
+                retention_breakdown["more_7d"] += 1
+
+    config = get_config()
+    config_snapshot = {
+        "retention_hours": config.get("retention_hours", 24),
+        "retention_min_hours": config.get("retention_min_hours", 0),
+        "retention_max_hours": config.get("retention_max_hours", 168),
+        "max_upload_size_mb": config.get("max_upload_size_mb", 500),
+        "max_concurrent_uploads": int(config.get("max_concurrent_uploads", 10)),
+        "cleanup_interval_minutes": int(config.get("cleanup_interval_minutes", 5)),
+        "ui_auth_enabled": config.get("ui_auth_enabled", False),
+        "api_auth_enabled": config.get("api_auth_enabled", False),
+        "api_keys_count": len(config.get("api_keys", [])),
+    }
+
+    quota_limit_gb = _get_optional_float_env("LOCALHOSTING_STORAGE_QUOTA_GB")
+    if quota_limit_gb and quota_limit_gb > 0:
+        quota_used_percent = (
+            storage_stats["total_bytes"] / (quota_limit_gb * 1024 ** 3) * 100
+        )
+    else:
+        quota_used_percent = None
+
+    return render_template(
+        "metrics.html",
+        storage_stats=storage_stats,
+        health_checks=health_checks,
+        recent_files=recent_files,
+        retention_breakdown=retention_breakdown,
+        config_snapshot=config_snapshot,
+        quota_limit_gb=quota_limit_gb,
+        quota_used_percent=quota_used_percent,
+    )
 
 
 @app.errorhandler(404)
