@@ -70,7 +70,13 @@
               <td>{{ file.size|human_filesize }}</td>
               <td>{{ file.uploaded_at|human_datetime }}</td>
               <td>{{ file.expires_at|human_datetime }}</td>
-              <td class="time-remaining">{{ file.remaining_seconds|human_timedelta }}</td>
+              <td class="time-remaining">
+                {% if file.permanent %}
+                  <span style="color: #059669; font-weight: 600;">∞ Permanent</span>
+                {% else %}
+                  {{ file.remaining_seconds|human_timedelta }}
+                {% endif %}
+              </td>
               <td class="actions-cell">
                 <a
                   href="{{ file.download_url }}"
@@ -80,16 +86,16 @@
                 >
                   <span class="icon" aria-hidden="true">⬇️</span>
                 </a>
-                <a
-                  href="{{ file.direct_download_url }}"
-                  class="button secondary icon-only"
-                  title="Open direct link"
-                  aria-label="Open direct link"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  class="button secondary icon-only copy-link-btn"
+                  title="Copy direct link"
+                  aria-label="Copy direct link"
+                  data-url="{{ file.direct_download_url }}"
+                  data-filename="{{ file.original_name }}"
                 >
                   <span class="icon" aria-hidden="true">🔗</span>
-                </a>
+                </button>
                 {% if file.raw_download_url %}
                   <a
                     href="{{ file.raw_download_url }}"
@@ -143,4 +149,100 @@
       {% endif %}
     {% endif %}
   </section>
+
+  <!-- Toast notification for copy feedback -->
+  <div id="copy-toast" class="copy-toast hidden" role="status" aria-live="polite">
+    <span class="copy-toast-icon">✓</span>
+    <span class="copy-toast-text"></span>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function() {
+      const copyButtons = document.querySelectorAll('.copy-link-btn');
+      const toast = document.getElementById('copy-toast');
+      const toastText = toast ? toast.querySelector('.copy-toast-text') : null;
+      let toastTimeout = null;
+
+      function showToast(message, duration = 2000) {
+        if (!toast || !toastText) return;
+
+        // Clear any existing timeout
+        if (toastTimeout) {
+          clearTimeout(toastTimeout);
+        }
+
+        // Update and show toast
+        toastText.textContent = message;
+        toast.classList.remove('hidden');
+        toast.classList.add('show');
+
+        // Hide after duration
+        toastTimeout = setTimeout(function() {
+          toast.classList.remove('show');
+          setTimeout(function() {
+            toast.classList.add('hidden');
+          }, 300); // Wait for fade out animation
+        }, duration);
+      }
+
+      function copyToClipboard(text, filename) {
+        // Try modern clipboard API first
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text)
+            .then(function() {
+              showToast('Link copied: ' + filename);
+            })
+            .catch(function(err) {
+              console.error('Clipboard API failed:', err);
+              fallbackCopy(text, filename);
+            });
+        } else {
+          fallbackCopy(text, filename);
+        }
+      }
+
+      function fallbackCopy(text, filename) {
+        // Fallback for older browsers
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '-9999px';
+        document.body.appendChild(textarea);
+        
+        try {
+          textarea.focus();
+          textarea.select();
+          const successful = document.execCommand('copy');
+          if (successful) {
+            showToast('Link copied: ' + filename);
+          } else {
+            showToast('Failed to copy link', 3000);
+          }
+        } catch (err) {
+          console.error('Fallback copy failed:', err);
+          showToast('Copy not supported in this browser', 3000);
+        } finally {
+          document.body.removeChild(textarea);
+        }
+      }
+
+      // Add click handlers to all copy buttons
+      copyButtons.forEach(function(button) {
+        button.addEventListener('click', function(e) {
+          e.preventDefault();
+          const url = this.getAttribute('data-url');
+          const filename = this.getAttribute('data-filename');
+          
+          if (url) {
+            // Convert relative URL to absolute if needed
+            const absoluteUrl = url.startsWith('http') ? url : window.location.origin + url;
+            copyToClipboard(absoluteUrl, filename || absoluteUrl);
+          }
+        });
+      });
+    })();
+  </script>
 {% endblock %}

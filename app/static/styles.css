@@ -1068,3 +1068,95 @@ footer {
   padding: 1rem 0;
   color: #6b7280;
 }
+
+.form-control input:disabled {
+  background-color: #f3f4f6;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Toast notification for copy feedback */
+.copy-toast {
+  position: fixed;
+  bottom: 2rem;
+  right: 2rem;
+  background: #059669;
+  color: #ffffff;
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  z-index: 1000;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  max-width: 400px;
+}
+
+.copy-toast.hidden {
+  display: none;
+}
+
+.copy-toast.show {
+  animation: slideInUp 0.3s ease;
+}
+
+.copy-toast-icon {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.copy-toast-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Make copy button look consistent with other icon buttons */
+.copy-link-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.copy-link-btn:hover,
+.copy-link-btn:focus-visible {
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .copy-toast {
+    background: #047857;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+  
+  .copy-link-btn:hover,
+  .copy-link-btn:focus-visible {
+    background: rgba(226, 232, 240, 0.12);
+  }
+}
+
+@media (max-width: 640px) {
+  .copy-toast {
+    bottom: 1rem;
+    right: 1rem;
+    left: 1rem;
+    max-width: none;
+  }
+}
