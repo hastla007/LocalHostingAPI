@@ -44,9 +44,22 @@
       </div>
       <div class="form-row form-row-actions">
         <label class="form-control">
+          <span>Storage Options</span>
+          <label for="permanent" class="checkbox-label" style="margin-top: 0.5rem;">
+            <input
+              type="checkbox"
+              id="permanent"
+              name="permanent"
+              value="true"
+            />
+            Keep file permanently (until manual deletion)
+          </label>
+        </label>
+        <label class="form-control" id="retention-control">
           <span>Retention (hours)</span>
           <input
             type="number"
+            id="retention_hours"
             name="retention_hours"
             step="0.1"
             min="{{ config.retention_min_hours }}"
@@ -107,11 +120,29 @@
       const dropZone = document.getElementById('drop-zone');
       const dropZoneFileName = document.getElementById('drop-zone-filename');
       const fileSelectButton = document.getElementById('file-select-button');
-      const retentionInput = form.querySelector('input[name="retention_hours"]');
+      const permanentCheckbox = document.getElementById('permanent');
+      const retentionInput = document.getElementById('retention_hours');
+      const retentionControl = document.getElementById('retention-control');
       const uploadQueue = [];
       let isUploading = false;
       let completedCount = 0;
       let currentXHR = null;
+
+      if (permanentCheckbox && retentionInput && retentionControl) {
+        const togglePermanent = () => {
+          if (permanentCheckbox.checked) {
+            retentionInput.disabled = true;
+            retentionInput.removeAttribute('required');
+            retentionControl.style.opacity = '0.5';
+          } else {
+            retentionInput.disabled = false;
+            retentionInput.setAttribute('required', 'required');
+            retentionControl.style.opacity = '1';
+          }
+        };
+        permanentCheckbox.addEventListener('change', togglePermanent);
+        togglePermanent();
+      }
 
       const resetProgress = () => {
         progressBar.style.width = '0%';
@@ -209,7 +240,9 @@
         updateDropZoneState(`Uploading: ${activeFile.name}`);
 
         const formData = new FormData();
-        if (retentionInput && retentionInput.value) {
+        if (permanentCheckbox && permanentCheckbox.checked) {
+          formData.append('permanent', 'true');
+        } else if (retentionInput && retentionInput.value) {
           formData.append('retention_hours', retentionInput.value);
         }
         formData.append('file', activeFile, activeFile.name);

@@ -1068,3 +1068,10 @@ footer {
   padding: 1rem 0;
   color: #6b7280;
 }
+
+.form-control input:disabled {
+  background-color: #f3f4f6;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
