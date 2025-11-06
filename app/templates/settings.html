@@ -1,5 +1,57 @@
 {% extends "base.html" %}
 {% block content %}
+  <section class="card">
+    <h2>UI Authentication</h2>
+    <form method="post" class="form-grid auth-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="action" value="update_ui_auth" />
+
+      <label for="ui_auth_enabled" class="checkbox-label">
+        <input
+          type="checkbox"
+          id="ui_auth_enabled"
+          name="ui_auth_enabled"
+          {% if config.ui_auth_enabled %}checked{% endif %}
+        />
+        Require login for dashboard pages
+      </label>
+
+      <label for="ui_username">Username</label>
+      <input
+        type="text"
+        id="ui_username"
+        name="ui_username"
+        value="{{ config.ui_username }}"
+        autocomplete="username"
+      />
+
+      <label for="ui_password">New password</label>
+      <input
+        type="password"
+        id="ui_password"
+        name="ui_password"
+        autocomplete="new-password"
+        placeholder="Leave blank to keep current password"
+      />
+
+      <label for="ui_password_confirm">Confirm password</label>
+      <input
+        type="password"
+        id="ui_password_confirm"
+        name="ui_password_confirm"
+        autocomplete="new-password"
+        placeholder="Repeat new password"
+      />
+
+      <p class="form-help">
+        Authentication is optional by default. Enable it to require users to log in before accessing the dashboard. Leave the
+        password fields blank to keep the existing password.
+      </p>
+
+      <button type="submit" class="button primary">Update Authentication</button>
+    </form>
+  </section>
+
   <div class="settings-row">
     <section class="card retention-card">
       <h2>Retention Settings</h2>
@@ -238,56 +290,5 @@
       These policies are read from environment variables today. Capturing them here keeps operators informed until the values
       can be edited directly through the dashboard.
     </p>
-  </section>
-  <section class="card">
-    <h2>UI Authentication</h2>
-    <form method="post" class="form-grid auth-grid">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-      <input type="hidden" name="action" value="update_ui_auth" />
-
-      <label for="ui_auth_enabled" class="checkbox-label">
-        <input
-          type="checkbox"
-          id="ui_auth_enabled"
-          name="ui_auth_enabled"
-          {% if config.ui_auth_enabled %}checked{% endif %}
-        />
-        Require login for dashboard pages
-      </label>
-
-      <label for="ui_username">Username</label>
-      <input
-        type="text"
-        id="ui_username"
-        name="ui_username"
-        value="{{ config.ui_username }}"
-        autocomplete="username"
-      />
-
-      <label for="ui_password">New password</label>
-      <input
-        type="password"
-        id="ui_password"
-        name="ui_password"
-        autocomplete="new-password"
-        placeholder="Leave blank to keep current password"
-      />
-
-      <label for="ui_password_confirm">Confirm password</label>
-      <input
-        type="password"
-        id="ui_password_confirm"
-        name="ui_password_confirm"
-        autocomplete="new-password"
-        placeholder="Repeat new password"
-      />
-
-      <p class="form-help">
-        Authentication is optional by default. Enable it to require users to log in before accessing the dashboard. Leave the
-        password fields blank to keep the existing password.
-      </p>
-
-      <button type="submit" class="button primary">Update Authentication</button>
-    </form>
   </section>
 {% endblock %}
