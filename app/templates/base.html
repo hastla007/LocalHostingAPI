@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Local Hosting API" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+    <link rel="stylesheet" href="https://code.ionicframework.com/ionicons/2.0.1/css/ionicons.min.css" />
   </head>
   <body>
     <header>
@@ -47,7 +48,7 @@
       {% block content %}{% endblock %}
     </main>
     <footer>
-      <p>&copy; {{ current_year or now().year }} Local Hosting API</p>
+      <p class="love">Made with <i class="icon ion-heart"></i> for Your business. © 2025 LocalHostingAPI by Nowdoo Automations</p>
     </footer>
     {% block scripts %}{% endblock %}
   </body>
