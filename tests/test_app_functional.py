@@ -387,6 +387,18 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app_module.login_rate_limit_string(), "6 per minute")
         self.assertEqual(self.app_module.download_rate_limit_string(), "80 per minute")
 
+    def test_get_config_detects_external_changes(self):
+        config_before = self.app_module.get_config()
+        self.assertEqual(config_before["max_upload_size_mb"], 500.0)
+
+        updated = dict(config_before)
+        updated["max_upload_size_mb"] = 777
+        self.storage.save_config(updated)
+
+        reloaded = self.app_module.get_config()
+        self.assertEqual(reloaded["max_upload_size_mb"], 777.0)
+        self.assertEqual(self.app.config["MAX_UPLOAD_SIZE_MB"], 777.0)
+
     def test_api_keys_page_renders(self):
         response = self.client.get("/apikeys")
         self.assertEqual(response.status_code, 200)
@@ -418,6 +430,36 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
         self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
+
+    def test_delete_route_handles_disk_error(self):
+        upload_response = self.client.post(
+            "/fileupload",
+            data={
+                "file": (io.BytesIO(b"disk issue"), "disk.txt"),
+                "retention_hours": "1",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload_response.status_code, 201)
+        payload = upload_response.get_json()
+        file_id = payload["id"]
+        record = self.storage.get_file(file_id)
+        self.assertIsNotNone(record)
+        stored_name = record["stored_name"]
+        file_path = self.storage.get_storage_path(file_id, stored_name)
+
+        with mock.patch("pathlib.Path.unlink", side_effect=PermissionError("denied")):
+            delete_response = self.client.post(
+                f"/hosting/delete/{file_id}",
+                follow_redirects=True,
+            )
+
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertIn(b"File deleted successfully.", delete_response.data)
+        self.assertIsNone(self.storage.get_file(file_id))
+        self.assertTrue(file_path.exists())
+
+        file_path.unlink()
 
     def test_cleanup_removes_expired_files_without_request(self):
         upload_response = self.client.post(

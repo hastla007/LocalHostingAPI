@@ -162,6 +162,7 @@ from .storage import (
     iter_files,
     list_files,
     load_config,
+    get_config_mtime,
     hash_api_key,
     prune_empty_upload_dirs,
     register_file,
@@ -170,6 +171,7 @@ from .storage import (
 )
 
 _CONFIG_CACHE: Dict[str, Any] = load_config()
+_CONFIG_CACHE_MTIME: float = get_config_mtime()
 _config_lock = threading.RLock()
 quota_lock = threading.RLock()
 
@@ -773,10 +775,15 @@ def _apply_runtime_settings(config: Dict[str, Any]) -> None:
 
 
 def get_config(refresh: bool = False) -> Dict[str, Any]:
-    global _CONFIG_CACHE
+    global _CONFIG_CACHE, _CONFIG_CACHE_MTIME
     with _config_lock:
+        current_mtime = get_config_mtime()
+        if not refresh and current_mtime > _CONFIG_CACHE_MTIME:
+            refresh = True
+
         if refresh or _CONFIG_CACHE is None:
             _CONFIG_CACHE = load_config()
+            _CONFIG_CACHE_MTIME = get_config_mtime()
 
         if has_request_context():
             cached = getattr(g, "_app_config", None)
