@@ -152,14 +152,18 @@ from .storage import (
     cleanup_orphaned_files,
     cleanup_temp_files,
     count_files,
+    create_directory,
     delete_file,
+    download_file_from_url,
     ensure_directories,
     get_db,
+    get_directory,
     get_file,
     get_file_by_direct_path,
     get_storage_statistics,
     get_storage_path,
     iter_files,
+    list_directory_files,
     list_files,
     load_config,
     get_config_mtime,
@@ -167,6 +171,7 @@ from .storage import (
     prune_empty_upload_dirs,
     register_file,
     save_config,
+    update_directory_file_count,
     DEFAULT_MAX_CONCURRENT_UPLOADS,
 )
 
@@ -3940,6 +3945,580 @@ def metrics():
         config_snapshot=config_snapshot,
         quota_limit_gb=quota_limit_gb,
         quota_used_percent=quota_used_percent,
+    )
+
+
+
+
+@csrf.exempt
+@app.route("/directories", methods=["POST"])
+@require_api_auth()
+def create_directory_endpoint():
+    """Create a new directory for grouping uploads."""
+
+    try:
+        if request.is_json:
+            data = request.get_json() or {}
+        else:
+            data = request.form.to_dict()
+
+        name = data.get("name", "").strip()
+        description = data.get("description", "").strip()
+
+        if not name:
+            name = f"Collection {uuid.uuid4().hex[:8]}"
+
+        directory_id = create_directory(name, description)
+        directory = get_directory(directory_id)
+
+        lifecycle_logger.info(
+            "directory_created directory_id=%s name=%s",
+            directory_id,
+            sanitize_log_value(name),
+        )
+
+        return (
+            jsonify(
+                {
+                    "directory_id": directory_id,
+                    "name": directory["name"],
+                    "description": directory["description"],
+                    "created_at": directory["created_at"],
+                    "created_at_iso": isoformat_utc(directory["created_at"]),
+                    "file_count": 0,
+                    "message": "Directory created successfully.",
+                }
+            ),
+            201,
+        )
+
+    except Exception as error:
+        lifecycle_logger.exception("directory_creation_failed")
+        return (
+            jsonify(
+                {
+                    "error": "Failed to create directory",
+                    "detail": str(error),
+                }
+            ),
+            500,
+        )
+
+
+@csrf.exempt
+@app.route("/directories/<directory_id>/files", methods=["POST"])
+@require_api_auth()
+@limiter.limit(lambda: upload_rate_limit_string())
+def upload_to_directory(directory_id: str):
+    """Upload files to a specific directory, optionally from URLs with renaming."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        lifecycle_logger.warning("directory_not_found directory_id=%s", directory_id)
+        return jsonify({"error": "Directory not found"}), 404
+
+    rename_enabled = request.args.get("rename", "false").lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+
+    config = get_config()
+
+    if request.is_json:
+        return _handle_url_uploads(directory_id, rename_enabled, config)
+    return _handle_direct_uploads(directory_id, rename_enabled, config)
+
+
+def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
+    """Handle uploads from URLs specified in JSON."""
+
+    data = request.get_json() or {}
+    files_data = data.get("files", [])
+
+    if not files_data:
+        return jsonify({"error": "No files provided in request"}), 400
+
+    if not isinstance(files_data, list):
+        return jsonify({"error": "files must be an array"}), 400
+
+    permanent = data.get("permanent", False)
+    if not permanent:
+        try:
+            retention_hours = resolve_retention(
+                config,
+                data.get("retention_hours"),
+            )
+        except RetentionValidationError as error:
+            return jsonify(error.to_payload()), 400
+    else:
+        retention_hours = 0
+
+    results = []
+    failures = []
+    successful_uploads = []
+
+    for idx, file_entry in enumerate(files_data):
+        if not isinstance(file_entry, dict):
+            failures.append(
+                {
+                    "index": idx,
+                    "reason": "invalid_format",
+                    "detail": "Each file entry must be an object",
+                }
+            )
+            continue
+
+        url = file_entry.get("url", "").strip()
+        title = file_entry.get("title", "").strip()
+
+        if not url:
+            failures.append(
+                {
+                    "index": idx,
+                    "reason": "missing_url",
+                    "detail": "URL is required for each file",
+                }
+            )
+            continue
+
+        if rename_enabled and title:
+            parsed_url = urlparse(url)
+            url_path = parsed_url.path
+            _, ext = os.path.splitext(url_path)
+
+            safe_title = secure_filename(title)
+            if not safe_title:
+                safe_title = f"file-{idx}"
+
+            filename = f"{safe_title}{ext}" if ext else safe_title
+        else:
+            parsed_url = urlparse(url)
+            filename = os.path.basename(parsed_url.path) or f"download-{idx}.bin"
+            filename = secure_filename(filename) or f"download-{idx}.bin"
+
+        is_valid, error_msg = validate_filename(filename)
+        if not is_valid:
+            failures.append(
+                {
+                    "index": idx,
+                    "url": url,
+                    "reason": "invalid_filename",
+                    "detail": error_msg,
+                }
+            )
+            continue
+
+        try:
+            lifecycle_logger.info(
+                "downloading_from_url url=%s directory_id=%s",
+                sanitize_log_value(url),
+                directory_id,
+            )
+            content, content_type = download_file_from_url(url)
+        except Exception as error:
+            lifecycle_logger.exception(
+                "url_download_failed url=%s", sanitize_log_value(url)
+            )
+            failures.append(
+                {
+                    "index": idx,
+                    "url": url,
+                    "reason": "download_failed",
+                    "detail": str(error),
+                }
+            )
+            continue
+
+        size = len(content)
+        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+        if max_bytes and size > max_bytes:
+            failures.append(
+                {
+                    "index": idx,
+                    "url": url,
+                    "filename": filename,
+                    "reason": "too_large",
+                    "detail": f"File size {size} exceeds limit {max_bytes}",
+                }
+            )
+            continue
+
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+
+        try:
+            upload_path.write_bytes(content)
+
+            try:
+                with quota_lock:
+                    enforce_storage_quota_for_size(size)
+                    file_id = register_file(
+                        original_name=filename,
+                        stored_name=stored_name,
+                        content_type=content_type,
+                        size=size,
+                        retention_hours=retention_hours,
+                        file_id=file_id,
+                        permanent=permanent,
+                    )
+
+                    with get_db() as conn:
+                        conn.execute(
+                            "UPDATE files SET directory_id = ? WHERE id = ?",
+                            (directory_id, file_id),
+                        )
+                        conn.commit()
+
+            except StorageQuotaExceededError:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                failures.append(
+                    {
+                        "index": idx,
+                        "url": url,
+                        "filename": filename,
+                        "reason": "quota_exceeded",
+                    }
+                )
+                lifecycle_logger.warning(
+                    "upload_quota_exceeded directory_id=%s url=%s",
+                    directory_id,
+                    sanitize_log_value(url),
+                )
+                continue
+
+            record = get_file(file_id)
+            if not record:
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+                failures.append(
+                    {
+                        "index": idx,
+                        "url": url,
+                        "filename": filename,
+                        "reason": "registration_failed",
+                    }
+                )
+                continue
+
+            download_url = url_for("download", file_id=file_id, _external=True)
+            direct_download_url = url_for(
+                "direct_download", file_id=file_id, filename=filename, _external=True
+            )
+            raw_download_url = (
+                url_for("serve_raw_file", direct_path=record["direct_path"], _external=True)
+                if record["direct_path"]
+                else ""
+            )
+
+            results.append(
+                {
+                    "id": file_id,
+                    "filename": filename,
+                    "size": size,
+                    "original_url": url,
+                    "title": title if title else None,
+                    "download_url": download_url,
+                    "direct_download_url": direct_download_url,
+                    "raw_download_url": raw_download_url,
+                    "retention_hours": retention_hours if not permanent else None,
+                    "permanent": permanent,
+                    "uploaded_at": record["uploaded_at"],
+                    "expires_at": record["expires_at"],
+                }
+            )
+
+            successful_uploads.append((file_id, stored_name))
+
+            lifecycle_logger.info(
+                "file_uploaded_to_directory file_id=%s directory_id=%s filename=%s url=%s",
+                file_id,
+                directory_id,
+                sanitize_log_value(filename),
+                sanitize_log_value(url),
+            )
+
+        except Exception as error:
+            lifecycle_logger.exception(
+                "file_store_failed directory_id=%s url=%s",
+                directory_id,
+                sanitize_log_value(url),
+            )
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+                prune_empty_upload_dirs(upload_path.parent)
+            failures.append(
+                {
+                    "index": idx,
+                    "url": url,
+                    "filename": filename,
+                    "reason": "storage_failed",
+                    "detail": str(error),
+                }
+            )
+
+    update_directory_file_count(directory_id)
+
+    if failures:
+        failed_rollbacks = rollback_successful_uploads(successful_uploads)
+        status = 400
+        payload = {
+            "message": f"Failed to upload {len(failures)} file(s).",
+            "errors": failures,
+            "successful": len(results),
+        }
+        if failed_rollbacks:
+            payload["rollback_failed_ids"] = failed_rollbacks
+        return jsonify(payload), status
+
+    if not results:
+        return jsonify({"message": "No files were uploaded.", "errors": failures}), 400
+
+    return (
+        jsonify(
+            {
+                "directory_id": directory_id,
+                "message": f"Successfully uploaded {len(results)} file(s).",
+                "files": results,
+                "retention_hours": retention_hours if not permanent else None,
+                "permanent": permanent,
+            }
+        ),
+        201,
+    )
+
+
+def _handle_direct_uploads(directory_id: str, rename_enabled: bool, config: dict):
+    """Handle direct multipart file uploads to a directory."""
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    uploads = request.files.getlist("file")
+    if not uploads:
+        return jsonify({"error": "No files selected"}), 400
+
+    title = request.form.get("title", "").strip()
+
+    permanent = request.form.get("permanent", "").lower() in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }
+    if not permanent:
+        try:
+            retention_hours = resolve_retention(
+                config,
+                request.form.get("retention_hours"),
+            )
+        except RetentionValidationError as error:
+            return jsonify(error.to_payload()), 400
+    else:
+        retention_hours = 0
+
+    results = []
+    failures = []
+    successful_uploads = []
+
+    for idx, upload in enumerate(uploads):
+        if not isinstance(upload, FileStorage) or not upload or upload.filename == "":
+            continue
+
+        if rename_enabled and title:
+            _, ext = os.path.splitext(upload.filename)
+            safe_title = secure_filename(title)
+            filename = f"{safe_title}{ext}" if ext else safe_title
+        else:
+            filename = secure_filename(upload.filename)
+
+        if not filename:
+            filename = f"upload-{idx}.bin"
+
+        is_valid, error_msg = validate_filename(filename)
+        if not is_valid:
+            failures.append(
+                {
+                    "index": idx,
+                    "filename": upload.filename,
+                    "reason": "invalid_filename",
+                    "detail": error_msg,
+                }
+            )
+            continue
+
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+        temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
+
+        with upload_stream_handler(upload) as managed_upload:
+            try:
+                with temp_path.open("wb") as destination:
+                    written = 0
+                    max_bytes = app.config.get("MAX_CONTENT_LENGTH")
+                    while True:
+                        chunk = managed_upload.stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if max_bytes and written + len(chunk) > max_bytes:
+                            raise ValueError("file too large")
+                        destination.write(chunk)
+                        written += len(chunk)
+
+                temp_path.replace(upload_path)
+                size = written if written else upload_path.stat().st_size
+
+                with quota_lock:
+                    enforce_storage_quota_for_size(size)
+                    file_id = register_file(
+                        original_name=filename,
+                        stored_name=stored_name,
+                        content_type=managed_upload.content_type,
+                        size=size,
+                        retention_hours=retention_hours,
+                        file_id=file_id,
+                        permanent=permanent,
+                    )
+
+                    with get_db() as conn:
+                        conn.execute(
+                            "UPDATE files SET directory_id = ? WHERE id = ?",
+                            (directory_id, file_id),
+                        )
+                        conn.commit()
+
+            except (ValueError, StorageQuotaExceededError) as error:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                failures.append(
+                    {
+                        "index": idx,
+                        "filename": filename,
+                        "reason": "too_large"
+                        if isinstance(error, ValueError)
+                        else "quota_exceeded",
+                    }
+                )
+                continue
+            except Exception as error:
+                lifecycle_logger.exception(
+                    "file_upload_failed directory_id=%s filename=%s",
+                    directory_id,
+                    sanitize_log_value(filename),
+                )
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                    prune_empty_upload_dirs(upload_path.parent)
+                failures.append(
+                    {
+                        "index": idx,
+                        "filename": filename,
+                        "reason": "storage_failed",
+                        "detail": str(error),
+                    }
+                )
+                continue
+
+        record = get_file(file_id)
+        if not record:
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
+            failures.append(
+                {
+                    "index": idx,
+                    "filename": filename,
+                    "reason": "registration_failed",
+                }
+            )
+            continue
+
+        download_url = url_for("download", file_id=file_id, _external=True)
+        direct_download_url = url_for(
+            "direct_download", file_id=file_id, filename=filename, _external=True
+        )
+        raw_download_url = (
+            url_for("serve_raw_file", direct_path=record["direct_path"], _external=True)
+            if record["direct_path"]
+            else ""
+        )
+
+        results.append(
+            {
+                "id": file_id,
+                "filename": filename,
+                "size": size,
+                "download_url": download_url,
+                "direct_download_url": direct_download_url,
+                "raw_download_url": raw_download_url,
+                "retention_hours": retention_hours if not permanent else None,
+                "permanent": permanent,
+            }
+        )
+
+        successful_uploads.append((file_id, stored_name))
+
+    update_directory_file_count(directory_id)
+
+    if failures:
+        return (
+            jsonify(
+                {
+                    "message": f"Failed to upload {len(failures)} file(s).",
+                    "errors": failures,
+                    "successful": len(results),
+                }
+            ),
+            400,
+        )
+
+    if not results:
+        return jsonify({"message": "No valid files uploaded."}), 400
+
+    return (
+        jsonify(
+            {
+                "directory_id": directory_id,
+                "message": f"Successfully uploaded {len(results)} file(s).",
+                "files": results,
+                "retention_hours": retention_hours if not permanent else None,
+                "permanent": permanent,
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/directories/<directory_id>", methods=["GET"])
+@require_ui_auth
+def get_directory_info(directory_id: str):
+    """Get information about a directory and its files."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        abort(404)
+
+    files = list_directory_files(directory_id)
+    file_list = list(iter_files(files))
+
+    return jsonify(
+        {
+            "directory_id": directory["id"],
+            "name": directory["name"],
+            "description": directory["description"],
+            "created_at": directory["created_at"],
+            "created_at_iso": isoformat_utc(directory["created_at"]),
+            "file_count": len(file_list),
+            "files": file_list,
+        }
     )
 
 
