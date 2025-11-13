@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -14,6 +16,13 @@ from flask import g, has_request_context
 
 from werkzeug.security import generate_password_hash
 from werkzeug.utils import secure_filename
+
+_REQUESTS_SPEC = importlib.util.find_spec("requests")
+if _REQUESTS_SPEC is not None:
+    requests = importlib.import_module("requests")  # type: ignore[assignment]
+else:
+    from . import _requests_fallback as requests  # type: ignore[no-redef]
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -375,6 +384,185 @@ def init_db() -> None:
         conn.commit()
 
 
+def init_directories_table() -> None:
+    """Initialize the directories table for grouping uploads."""
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS directories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at REAL NOT NULL,
+                file_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(files)")
+        }
+        if "directory_id" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN directory_id TEXT")
+            conn.commit()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_directory_id ON files(directory_id)"
+            )
+            conn.commit()
+
+
+def create_directory(name: str, description: Optional[str] = None) -> str:
+    """Create a new directory for grouping files."""
+
+    directory_id = str(uuid.uuid4())
+    created_at = time.time()
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO directories (id, name, description, created_at, file_count)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (directory_id, name, description or "", created_at),
+        )
+        conn.commit()
+
+    logger.info(
+        "directory_created directory_id=%s name=%s",
+        directory_id,
+        name,
+    )
+    return directory_id
+
+
+def get_directory(directory_id: str) -> Optional[sqlite3.Row]:
+    """Get directory information by ID."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM directories WHERE id = ?", (directory_id,)
+        )
+        return cursor.fetchone()
+
+
+def update_directory_file_count(directory_id: str) -> None:
+    """Update the file count for a directory."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) as count FROM files WHERE directory_id = ? AND expires_at >= ?",
+            (directory_id, time.time()),
+        )
+        count = cursor.fetchone()["count"]
+        conn.execute(
+            "UPDATE directories SET file_count = ? WHERE id = ?",
+            (count, directory_id),
+        )
+        conn.commit()
+
+
+def list_directory_files(directory_id: str) -> List[sqlite3.Row]:
+    """List all files in a directory."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            SELECT * FROM files 
+            WHERE directory_id = ? AND expires_at >= ?
+            ORDER BY uploaded_at DESC
+            """,
+            (directory_id, time.time()),
+        )
+        return cursor.fetchall()
+
+
+def list_directories(
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+) -> List[sqlite3.Row]:
+    """List all directories with sorting."""
+
+    with get_db() as conn:
+        sort_map = {
+            "name": "name",
+            "created_at": "created_at",
+            "file_count": "file_count",
+        }
+        column = sort_map.get(sort_by, "created_at")
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+
+        base_query = f"SELECT * FROM directories ORDER BY {column} {direction}"
+        params: List[int] = []
+
+        if limit is not None:
+            limit_value = max(int(limit), 0)
+            offset_value = max(int(offset), 0)
+            base_query += " LIMIT ? OFFSET ?"
+            params.extend([limit_value, offset_value])
+
+        cursor = conn.execute(base_query, tuple(params))
+        return cursor.fetchall()
+
+
+def count_directories() -> int:
+    """Count total directories."""
+
+    with get_db() as conn:
+        cursor = conn.execute("SELECT COUNT(*) AS count FROM directories")
+        row = cursor.fetchone()
+        return int(row["count"] if row and row["count"] is not None else 0)
+
+
+def delete_directory(directory_id: str) -> bool:
+    """Delete a directory and all its files."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        return False
+
+    files = list_directory_files(directory_id)
+
+    for file_row in files:
+        delete_file(file_row["id"])
+
+    with get_db() as conn:
+        conn.execute("DELETE FROM directories WHERE id = ?", (directory_id,))
+        conn.commit()
+
+    logger.info(
+        "directory_deleted directory_id=%s name=%s file_count=%d",
+        directory_id,
+        directory["name"],
+        len(files),
+    )
+    return True
+
+
+def download_file_from_url(url: str, timeout: int = 30) -> tuple[bytes, Optional[str]]:
+    """Download a file from a URL and return content and content-type."""
+
+    try:
+        response = requests.get(url, timeout=timeout, stream=True)
+        response.raise_for_status()
+
+        content = b""
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                content += chunk
+
+        content_type = response.headers.get("content-type")
+        return content, content_type
+    except requests.RequestException as error:
+        logger.error("url_download_failed url=%s error=%s", url, str(error))
+        raise
+
+
 def migrate_permanent_storage() -> None:
     """Ensure the files table has the permanent column and related index."""
 
@@ -394,6 +582,87 @@ def migrate_permanent_storage() -> None:
 
         if added_column:
             logger.info("Added permanent column to files table")
+
+
+def migrate_metadata_storage() -> None:
+    """Add metadata column to files table."""
+
+    with get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+
+        if "metadata" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN metadata TEXT")
+            conn.commit()
+            logger.info("Added metadata column to files table")
+
+
+def get_file_metadata(file_id: str) -> Dict[str, object]:
+    """Get metadata for a file."""
+
+    record = get_file(file_id)
+    if not record:
+        return {}
+
+    try:
+        value = record["metadata"] if "metadata" in record.keys() else None
+    except (KeyError, TypeError):
+        value = None
+
+    if not value:
+        return {}
+
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    return parsed
+
+
+def update_file_metadata(file_id: str, metadata: Dict[str, object]) -> bool:
+    """Update metadata for a file."""
+
+    record = get_file(file_id)
+    if not record:
+        return False
+
+    existing = get_file_metadata(file_id)
+    existing.update(metadata)
+
+    try:
+        metadata_json = json.dumps(existing)
+    except (TypeError, ValueError) as error:
+        logger.warning(
+            "metadata_serialize_failed file_id=%s error=%s", file_id, error
+        )
+        return False
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE files SET metadata = ? WHERE id = ?",
+            (metadata_json, file_id),
+        )
+        conn.commit()
+
+    logger.info(
+        "metadata_updated file_id=%s keys=%s",
+        file_id,
+        list(metadata.keys()),
+    )
+    return True
+
+
+def batch_update_metadata(file_ids: List[str], metadata: Dict[str, object]) -> int:
+    """Update metadata for multiple files at once."""
+
+    updated = 0
+    for file_id in file_ids:
+        if update_file_metadata(file_id, metadata):
+            updated += 1
+    return updated
 
 
 def _direct_path_in_use(conn: sqlite3.Connection, direct_path: str) -> bool:
@@ -959,6 +1228,16 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             if is_permanent
             else max(row["expires_at"] - time.time(), 0)
         )
+
+        metadata: Dict[str, object] = {}
+        if "metadata" in row.keys() and row["metadata"]:
+            try:
+                parsed_metadata = json.loads(row["metadata"])
+                if isinstance(parsed_metadata, dict):
+                    metadata = parsed_metadata
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+
         yield {
             "id": row["id"],
             "original_name": row["original_name"],
@@ -972,6 +1251,7 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             "download_url": f"/download/{row['id']}",
             "direct_download_url": f"/files/{row['id']}/{quote(row['original_name'])}",
             "raw_download_path": row["direct_path"],
+            "metadata": metadata,
         }
 
 
@@ -987,5 +1267,7 @@ logger = logging.getLogger("localhosting.storage")
 
 ensure_directories()
 init_db()
+init_directories_table()
 migrate_permanent_storage()
+migrate_metadata_storage()
 backfill_direct_paths()

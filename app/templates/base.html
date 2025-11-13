@@ -18,6 +18,7 @@
       </h1>
       <nav>
         <a href="{{ url_for('hosting') }}" class="{{ 'active' if request.endpoint == 'hosting' else '' }}">Hosting</a>
+        <a href="{{ url_for('directories') }}" class="{{ 'active' if request.endpoint in ('directories', 'view_directory', 'upload_to_directory_ui') else '' }}">Directories</a>
         <a href="{{ url_for('upload_file_page') }}" class="{{ 'active' if request.endpoint == 'upload_file_page' else '' }}">Upload File</a>
         <a href="{{ url_for('metrics') }}" class="{{ 'active' if request.endpoint == 'metrics' else '' }}">Metrics</a>
         <a href="{{ url_for('logs_page') }}" class="{{ 'active' if request.endpoint in ('logs_page', 'logs_data') else '' }}">Logs</a>

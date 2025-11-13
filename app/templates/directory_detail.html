@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem;">
+      <div>
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+          <a href="{{ url_for('directories') }}" style="color: #6b7280; text-decoration: none;">← Directories</a>
+          <span style="color: #6b7280;">/</span>
+          <h2 style="margin: 0;">📁 {{ directory.name }}</h2>
+        </div>
+        {% if directory.description %}
+          <p style="color: #6b7280; margin-top: 0.5rem;">{{ directory.description }}</p>
+        {% endif %}
+        <p style="color: #6b7280; font-size: 0.9rem; margin-top: 0.25rem;">
+          Created {{ directory.created_at|human_datetime }} • {{ directory.file_count }} file{{ 's' if directory.file_count != 1 else '' }}
+        </p>
+      </div>
+      <div style="display: flex; gap: 0.5rem;">
+        <a href="{{ url_for('upload_to_directory_ui', directory_id=directory.id) }}" class="button primary">
+          <span class="icon">⬆️</span>
+          <span class="label">Upload Files</span>
+        </a>
+        <form
+          method="post"
+          action="{{ url_for('delete_directory_route', directory_id=directory.id) }}"
+          class="inline-form"
+          onsubmit="return confirm('Delete this directory and all {{ directory.file_count }} file(s)? This cannot be undone.');"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <button type="submit" class="button danger">
+            <span class="icon">🗑️</span>
+            <span class="label">Delete Directory</span>
+          </button>
+        </form>
+      </div>
+    </div>
+
+    {% if files %}
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th>
+              {% set next_name_order = 'desc' if sort_by == 'name' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('view_directory', directory_id=directory.id, sort='name', order=next_name_order) }}">
+                Name {% if sort_by == 'name' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>
+              {% set next_size_order = 'desc' if sort_by == 'size' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('view_directory', directory_id=directory.id, sort='size', order=next_size_order) }}">
+                Size {% if sort_by == 'size' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>
+              {% set next_uploaded_order = 'desc' if sort_by == 'uploaded_at' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('view_directory', directory_id=directory.id, sort='uploaded_at', order=next_uploaded_order) }}">
+                Uploaded {% if sort_by == 'uploaded_at' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>
+              {% set next_expires_order = 'desc' if sort_by == 'expires_at' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('view_directory', directory_id=directory.id, sort='expires_at', order=next_expires_order) }}">
+                Expires {% if sort_by == 'expires_at' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>Time Remaining</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for file in files %}
+            <tr>
+              <td>
+                {{ file.original_name }}
+                {% if file.metadata %}
+                  <div style="font-size: 0.85rem; color: #6b7280; margin-top: 0.25rem;">
+                    {% if file.metadata.title and file.metadata.title != file.original_name %}
+                      <strong>{{ file.metadata.title }}</strong><br />
+                    {% endif %}
+                    {% if file.metadata.artist %}
+                      🎤 {{ file.metadata.artist }}<br />
+                    {% endif %}
+                    {% if file.metadata.duration %}
+                      ⏱️ {{ file.metadata.duration }}s
+                    {% endif %}
+                    {% if file.metadata.theme %}
+                      {% if file.metadata.duration %}<br />{% endif %}
+                      🎨 {{ file.metadata.theme }}
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </td>
+              <td>{{ file.size|human_filesize }}</td>
+              <td>{{ file.uploaded_at|human_datetime }}</td>
+              <td>{{ file.expires_at|human_datetime }}</td>
+              <td class="time-remaining">
+                {% if file.permanent %}
+                  <span style="color: #059669; font-weight: 600;">∞ Permanent</span>
+                {% else %}
+                  {{ file.remaining_seconds|human_timedelta }}
+                {% endif %}
+              </td>
+              <td class="actions-cell">
+                <a
+                  href="{{ file.download_url }}"
+                  class="button icon-only"
+                  title="Download file"
+                  aria-label="Download file"
+                >
+                  <span class="icon">⬇️</span>
+                </a>
+                <button
+                  type="button"
+                  class="button secondary icon-only copy-link-btn"
+                  title="Copy direct link"
+                  aria-label="Copy direct link"
+                  data-url="{{ file.direct_download_url }}"
+                  data-filename="{{ file.original_name }}"
+                >
+                  <span class="icon">🔗</span>
+                </button>
+                {% if file.raw_download_url %}
+                  <a
+                    href="{{ file.raw_download_url }}"
+                    class="button secondary icon-only"
+                    title="Open raw URL"
+                    aria-label="Open raw URL"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <span class="icon">🌐</span>
+                  </a>
+                {% endif %}
+                <a
+                  href="{{ url_for('edit_metadata_ui', file_id=file.id) }}"
+                  class="button secondary icon-only"
+                  title="Edit metadata"
+                  aria-label="Edit metadata"
+                >
+                  <span class="icon">✏️</span>
+                </a>
+                <form
+                  method="post"
+                  action="{{ url_for('hosting_delete', file_id=file.id) }}"
+                  class="inline-form"
+                  onsubmit="return confirm('Delete \'{{ file.original_name }}\'? This cannot be undone.');"
+                >
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <button
+                    type="submit"
+                    class="button danger icon-only"
+                    title="Delete file"
+                    aria-label="Delete file"
+                  >
+                    <span class="icon">🗑️</span>
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div style="text-align: center; padding: 3rem; color: #6b7280;">
+        <p style="font-size: 1.2rem; margin-bottom: 1rem;">📭 No files in this directory</p>
+        <a href="{{ url_for('upload_to_directory_ui', directory_id=directory.id) }}" class="button primary">
+          Upload Files
+        </a>
+      </div>
+    {% endif %}
+  </section>
+
+  <div id="copy-toast" class="copy-toast hidden" role="status" aria-live="polite">
+    <span class="copy-toast-icon">✓</span>
+    <span class="copy-toast-text"></span>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    (function() {
+      const copyButtons = document.querySelectorAll('.copy-link-btn');
+      const toast = document.getElementById('copy-toast');
+      const toastText = toast ? toast.querySelector('.copy-toast-text') : null;
+      let toastTimeout = null;
+
+      function showToast(message, duration) {
+        duration = duration || 2000;
+        if (!toast || !toastText) return;
+        if (toastTimeout) clearTimeout(toastTimeout);
+        toastText.textContent = message;
+        toast.classList.remove('hidden');
+        toast.classList.add('show');
+        toastTimeout = setTimeout(function() {
+          toast.classList.remove('show');
+          setTimeout(function() {
+            toast.classList.add('hidden');
+          }, 300);
+        }, duration);
+      }
+
+      function copyToClipboard(text, filename) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text)
+            .then(function() {
+              showToast('Link copied: ' + filename);
+            })
+            .catch(function() {
+              fallbackCopy(text, filename);
+            });
+        } else {
+          fallbackCopy(text, filename);
+        }
+      }
+
+      function fallbackCopy(text, filename) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+          document.execCommand('copy');
+          showToast('Link copied: ' + filename);
+        } catch (err) {
+          showToast('Copy failed', 3000);
+        }
+        document.body.removeChild(textarea);
+      }
+
+      copyButtons.forEach(function(button) {
+        button.addEventListener('click', function(e) {
+          e.preventDefault();
+          const url = this.getAttribute('data-url');
+          const filename = this.getAttribute('data-filename');
+          if (url) {
+            const absoluteUrl = url.startsWith('http') ? url : window.location.origin + url;
+            copyToClipboard(absoluteUrl, filename || absoluteUrl);
+          }
+        });
+      });
+    })();
+  </script>
+{% endblock %}
