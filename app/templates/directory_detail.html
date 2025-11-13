@@ -70,7 +70,26 @@
         <tbody>
           {% for file in files %}
             <tr>
-              <td>{{ file.original_name }}</td>
+              <td>
+                {{ file.original_name }}
+                {% if file.metadata %}
+                  <div style="font-size: 0.85rem; color: #6b7280; margin-top: 0.25rem;">
+                    {% if file.metadata.title and file.metadata.title != file.original_name %}
+                      <strong>{{ file.metadata.title }}</strong><br />
+                    {% endif %}
+                    {% if file.metadata.artist %}
+                      🎤 {{ file.metadata.artist }}<br />
+                    {% endif %}
+                    {% if file.metadata.duration %}
+                      ⏱️ {{ file.metadata.duration }}s
+                    {% endif %}
+                    {% if file.metadata.theme %}
+                      {% if file.metadata.duration %}<br />{% endif %}
+                      🎨 {{ file.metadata.theme }}
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </td>
               <td>{{ file.size|human_filesize }}</td>
               <td>{{ file.uploaded_at|human_datetime }}</td>
               <td>{{ file.expires_at|human_datetime }}</td>
@@ -112,6 +131,14 @@
                     <span class="icon">🌐</span>
                   </a>
                 {% endif %}
+                <a
+                  href="{{ url_for('edit_metadata_ui', file_id=file.id) }}"
+                  class="button secondary icon-only"
+                  title="Edit metadata"
+                  aria-label="Edit metadata"
+                >
+                  <span class="icon">✏️</span>
+                </a>
                 <form
                   method="post"
                   action="{{ url_for('hosting_delete', file_id=file.id) }}"

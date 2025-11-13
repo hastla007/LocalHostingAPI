@@ -584,6 +584,87 @@ def migrate_permanent_storage() -> None:
             logger.info("Added permanent column to files table")
 
 
+def migrate_metadata_storage() -> None:
+    """Add metadata column to files table."""
+
+    with get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(files)")}
+
+        if "metadata" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN metadata TEXT")
+            conn.commit()
+            logger.info("Added metadata column to files table")
+
+
+def get_file_metadata(file_id: str) -> Dict[str, object]:
+    """Get metadata for a file."""
+
+    record = get_file(file_id)
+    if not record:
+        return {}
+
+    try:
+        value = record["metadata"] if "metadata" in record.keys() else None
+    except (KeyError, TypeError):
+        value = None
+
+    if not value:
+        return {}
+
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    return parsed
+
+
+def update_file_metadata(file_id: str, metadata: Dict[str, object]) -> bool:
+    """Update metadata for a file."""
+
+    record = get_file(file_id)
+    if not record:
+        return False
+
+    existing = get_file_metadata(file_id)
+    existing.update(metadata)
+
+    try:
+        metadata_json = json.dumps(existing)
+    except (TypeError, ValueError) as error:
+        logger.warning(
+            "metadata_serialize_failed file_id=%s error=%s", file_id, error
+        )
+        return False
+
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE files SET metadata = ? WHERE id = ?",
+            (metadata_json, file_id),
+        )
+        conn.commit()
+
+    logger.info(
+        "metadata_updated file_id=%s keys=%s",
+        file_id,
+        list(metadata.keys()),
+    )
+    return True
+
+
+def batch_update_metadata(file_ids: List[str], metadata: Dict[str, object]) -> int:
+    """Update metadata for multiple files at once."""
+
+    updated = 0
+    for file_id in file_ids:
+        if update_file_metadata(file_id, metadata):
+            updated += 1
+    return updated
+
+
 def _direct_path_in_use(conn: sqlite3.Connection, direct_path: str) -> bool:
     if not direct_path:
         return True
@@ -1147,6 +1228,16 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             if is_permanent
             else max(row["expires_at"] - time.time(), 0)
         )
+
+        metadata: Dict[str, object] = {}
+        if "metadata" in row.keys() and row["metadata"]:
+            try:
+                parsed_metadata = json.loads(row["metadata"])
+                if isinstance(parsed_metadata, dict):
+                    metadata = parsed_metadata
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+
         yield {
             "id": row["id"],
             "original_name": row["original_name"],
@@ -1160,6 +1251,7 @@ def iter_files(records: Iterable[sqlite3.Row]) -> Iterable[Dict[str, object]]:
             "download_url": f"/download/{row['id']}",
             "direct_download_url": f"/files/{row['id']}/{quote(row['original_name'])}",
             "raw_download_path": row["direct_path"],
+            "metadata": metadata,
         }
 
 
@@ -1177,4 +1269,5 @@ ensure_directories()
 init_db()
 init_directories_table()
 migrate_permanent_storage()
+migrate_metadata_storage()
 backfill_direct_paths()

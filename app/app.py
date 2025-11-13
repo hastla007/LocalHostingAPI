@@ -147,6 +147,7 @@ from .storage import (
     DATA_DIR,
     LOGS_DIR,
     UPLOADS_DIR,
+    batch_update_metadata,
     RESERVED_DIRECT_PATHS,
     cleanup_expired_files,
     cleanup_orphaned_files,
@@ -162,6 +163,7 @@ from .storage import (
     get_directory,
     get_file,
     get_file_by_direct_path,
+    get_file_metadata,
     get_storage_statistics,
     get_storage_path,
     iter_files,
@@ -174,6 +176,7 @@ from .storage import (
     prune_empty_upload_dirs,
     register_file,
     save_config,
+    update_file_metadata,
     update_directory_file_count,
     DEFAULT_MAX_CONCURRENT_UPLOADS,
 )
@@ -4237,6 +4240,23 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 }
             )
 
+            metadata_fields: Dict[str, object] = {}
+            for key in [
+                "title",
+                "artist",
+                "album",
+                "duration",
+                "genre",
+                "year",
+                "theme",
+                "description",
+            ]:
+                if key in file_entry and file_entry[key]:
+                    metadata_fields[key] = file_entry[key]
+
+            if metadata_fields:
+                update_file_metadata(file_id, metadata_fields)
+
             successful_uploads.append((file_id, stored_name))
 
             lifecycle_logger.info(
@@ -4718,6 +4738,149 @@ def get_directory_info(directory_id: str):
             "file_count": len(file_list),
             "files": file_list,
         }
+    )
+
+
+@csrf.exempt
+@app.route("/files/<file_id>/metadata", methods=["GET", "PUT", "PATCH"])
+@require_api_auth()
+def file_metadata(file_id: str):
+    """Get or update file metadata."""
+
+    record = get_file(file_id)
+    if not record:
+        return jsonify({"error": "File not found"}), 404
+
+    if request.method == "GET":
+        metadata = get_file_metadata(file_id)
+        return jsonify(
+            {
+                "file_id": file_id,
+                "filename": record["original_name"],
+                "metadata": metadata,
+            }
+        )
+
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+
+    data = request.get_json() or {}
+    metadata_payload = data.get("metadata", {})
+
+    if not isinstance(metadata_payload, dict):
+        return jsonify({"error": "metadata must be an object"}), 400
+
+    invalid_keys = [
+        key
+        for key in metadata_payload.keys()
+        if not isinstance(key, str) or len(key) > 100
+    ]
+    if invalid_keys:
+        return jsonify({"error": "Invalid metadata keys"}), 400
+
+    success = update_file_metadata(file_id, metadata_payload)
+    if not success:
+        return jsonify({"error": "Failed to update metadata"}), 500
+
+    updated_metadata = get_file_metadata(file_id)
+
+    lifecycle_logger.info(
+        "metadata_updated file_id=%s keys=%s",
+        file_id,
+        sanitize_log_value(list(metadata_payload.keys())),
+    )
+
+    return jsonify(
+        {
+            "file_id": file_id,
+            "filename": record["original_name"],
+            "metadata": updated_metadata,
+            "message": "Metadata updated successfully.",
+        }
+    )
+
+
+@csrf.exempt
+@app.route("/files/metadata/batch", methods=["PUT"])
+@require_api_auth()
+def batch_update_file_metadata():
+    """Update metadata for multiple files at once."""
+
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+
+    data = request.get_json() or {}
+    file_ids = data.get("file_ids", [])
+    metadata_payload = data.get("metadata", {})
+
+    if not isinstance(file_ids, list) or not file_ids:
+        return jsonify({"error": "file_ids must be a non-empty array"}), 400
+
+    if not isinstance(metadata_payload, dict):
+        return jsonify({"error": "metadata must be an object"}), 400
+
+    invalid_keys = [
+        key
+        for key in metadata_payload.keys()
+        if not isinstance(key, str) or len(key) > 100
+    ]
+    if invalid_keys:
+        return jsonify({"error": "Invalid metadata keys"}), 400
+
+    normalized_ids: List[str] = []
+    for item in file_ids:
+        if isinstance(item, str):
+            stripped = item.strip()
+        else:
+            stripped = str(item).strip()
+        if stripped:
+            normalized_ids.append(stripped)
+
+    if not normalized_ids:
+        return jsonify({"error": "file_ids must contain at least one valid identifier"}), 400
+
+    updated = batch_update_metadata(normalized_ids, metadata_payload)
+
+    lifecycle_logger.info(
+        "metadata_batch_updated count=%d total=%d keys=%s",
+        updated,
+        len(normalized_ids),
+        sanitize_log_value(list(metadata_payload.keys())),
+    )
+
+    return jsonify(
+        {
+            "message": f"Updated metadata for {updated} file(s).",
+            "updated_count": updated,
+            "total_requested": len(normalized_ids),
+        }
+    )
+
+
+@app.route("/files/<file_id>/metadata/edit")
+@require_ui_auth
+def edit_metadata_ui(file_id: str):
+    """UI for editing file metadata."""
+
+    record = get_file(file_id)
+    if not record:
+        flash("File not found.", "error")
+        return redirect(url_for("hosting"))
+
+    metadata = get_file_metadata(file_id)
+
+    directory_id = None
+    if "directory_id" in record.keys():
+        directory_id = record["directory_id"]
+
+    return render_template(
+        "edit_metadata.html",
+        file={
+            "id": record["id"],
+            "original_name": record["original_name"],
+            "metadata": metadata,
+            "directory_id": directory_id,
+        },
     )
 
 
