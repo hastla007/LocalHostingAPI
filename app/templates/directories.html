@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+      <div>
+        <h2>Directories</h2>
+        <p style="color: #6b7280; margin-top: 0.5rem;">Organize your uploads into collections</p>
+      </div>
+      <button type="button" class="button primary" onclick="showCreateDialog()">
+        <span class="icon">➕</span>
+        <span class="label">New Directory</span>
+      </button>
+    </div>
+
+    <div class="pagination-info">
+      {% if total_directories %}
+        <p>Total: {{ total_directories }} director{{ 'y' if total_directories == 1 else 'ies' }}</p>
+      {% else %}
+        <p>No directories yet.</p>
+      {% endif %}
+    </div>
+
+    {% if directories %}
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th>
+              {% set next_name_order = 'desc' if sort_by == 'name' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('directories', sort='name', order=next_name_order, per_page=per_page) }}">
+                Name {% if sort_by == 'name' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>Description</th>
+            <th>
+              {% set next_count_order = 'desc' if sort_by == 'file_count' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('directories', sort='file_count', order=next_count_order, per_page=per_page) }}">
+                Files {% if sort_by == 'file_count' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>
+              {% set next_created_order = 'desc' if sort_by == 'created_at' and sort_order == 'asc' else 'asc' %}
+              <a href="{{ url_for('directories', sort='created_at', order=next_created_order, per_page=per_page) }}">
+                Created {% if sort_by == 'created_at' %}<span class="sort-indicator">{{ '↑' if sort_order == 'asc' else '↓' }}</span>{% endif %}
+              </a>
+            </th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for dir in directories %}
+            <tr>
+              <td>
+                <a href="{{ url_for('view_directory', directory_id=dir.id) }}" style="color: #2563eb; font-weight: 600;">
+                  📁 {{ dir.name }}
+                </a>
+              </td>
+              <td>{{ dir.description or '—' }}</td>
+              <td>{{ dir.file_count }}</td>
+              <td>{{ dir.created_at|human_datetime }}</td>
+              <td class="actions-cell">
+                <a
+                  href="{{ url_for('view_directory', directory_id=dir.id) }}"
+                  class="button icon-only"
+                  title="View directory"
+                  aria-label="View directory"
+                >
+                  <span class="icon">👁️</span>
+                </a>
+                <a
+                  href="{{ url_for('upload_to_directory_ui', directory_id=dir.id) }}"
+                  class="button secondary icon-only"
+                  title="Upload to directory"
+                  aria-label="Upload to directory"
+                >
+                  <span class="icon">⬆️</span>
+                </a>
+                <form
+                  method="post"
+                  action="{{ url_for('delete_directory_route', directory_id=dir.id) }}"
+                  class="inline-form"
+                  onsubmit="return confirm('Delete directory \'{{ dir.name }}\' and all {{ dir.file_count }} file(s)? This cannot be undone.');"
+                >
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <button
+                    type="submit"
+                    class="button danger icon-only"
+                    title="Delete directory"
+                    aria-label="Delete directory"
+                  >
+                    <span class="icon">🗑️</span>
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {% if total_pages > 1 %}
+        <div class="pagination">
+          {% if page > 1 %}
+            <a
+              href="{{ url_for('directories', page=page-1, sort=sort_by, order=sort_order, per_page=per_page) }}"
+              class="button secondary"
+            >← Previous</a>
+          {% endif %}
+          <span class="page-info">Page {{ page }} of {{ total_pages }}</span>
+          {% if page < total_pages %}
+            <a
+              href="{{ url_for('directories', page=page+1, sort=sort_by, order=sort_order, per_page=per_page) }}"
+              class="button secondary"
+            >Next →</a>
+          {% endif %}
+        </div>
+      {% endif %}
+    {% else %}
+      <div style="text-align: center; padding: 3rem; color: #6b7280;">
+        <p style="font-size: 1.2rem; margin-bottom: 1rem;">📂 No directories yet</p>
+        <p>Create your first directory to start organizing uploads</p>
+        <button type="button" class="button primary" onclick="showCreateDialog()" style="margin-top: 1rem;">
+          Create Directory
+        </button>
+      </div>
+    {% endif %}
+  </section>
+
+  <div id="create-dialog" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="card" style="max-width: 500px; margin: 2rem;">
+      <h3>Create New Directory</h3>
+      <form method="post" action="{{ url_for('directories') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="form-grid" style="gap: 1rem;">
+          <label for="name">Name *</label>
+          <input
+            type="text"
+            id="name"
+            name="name"
+            required
+            placeholder="e.g., Music Collection"
+            autofocus
+          />
+
+          <label for="description">Description</label>
+          <textarea
+            id="description"
+            name="description"
+            rows="3"
+            placeholder="Optional description"
+            style="padding: 0.5rem; border-radius: 6px; border: 1px solid #cbd5f5; font-family: inherit;"
+          ></textarea>
+
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+            <button type="submit" class="button primary">Create</button>
+            <button type="button" class="button secondary" onclick="hideCreateDialog()">Cancel</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+  <script>
+    function showCreateDialog() {
+      const dialog = document.getElementById('create-dialog');
+      dialog.style.display = 'flex';
+      const nameInput = document.getElementById('name');
+      if (nameInput) {
+        nameInput.focus();
+      }
+    }
+
+    function hideCreateDialog() {
+      const dialog = document.getElementById('create-dialog');
+      dialog.style.display = 'none';
+    }
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        hideCreateDialog();
+      }
+    });
+
+    document.getElementById('create-dialog').addEventListener('click', function(e) {
+      if (e.target === this) {
+        hideCreateDialog();
+      }
+    });
+  </script>
+{% endblock %}
