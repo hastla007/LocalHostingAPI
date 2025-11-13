@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -14,6 +16,13 @@ from flask import g, has_request_context
 
 from werkzeug.security import generate_password_hash
 from werkzeug.utils import secure_filename
+
+_REQUESTS_SPEC = importlib.util.find_spec("requests")
+if _REQUESTS_SPEC is not None:
+    requests = importlib.import_module("requests")  # type: ignore[assignment]
+else:
+    from . import _requests_fallback as requests  # type: ignore[no-redef]
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -373,6 +382,120 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_files_cleanup ON files(expires_at, permanent)"
         )
         conn.commit()
+
+
+def init_directories_table() -> None:
+    """Initialize the directories table for grouping uploads."""
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS directories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at REAL NOT NULL,
+                file_count INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(files)")
+        }
+        if "directory_id" not in columns:
+            conn.execute("ALTER TABLE files ADD COLUMN directory_id TEXT")
+            conn.commit()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_directory_id ON files(directory_id)"
+            )
+            conn.commit()
+
+
+def create_directory(name: str, description: Optional[str] = None) -> str:
+    """Create a new directory for grouping files."""
+
+    directory_id = str(uuid.uuid4())
+    created_at = time.time()
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO directories (id, name, description, created_at, file_count)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (directory_id, name, description or "", created_at),
+        )
+        conn.commit()
+
+    logger.info(
+        "directory_created directory_id=%s name=%s",
+        directory_id,
+        name,
+    )
+    return directory_id
+
+
+def get_directory(directory_id: str) -> Optional[sqlite3.Row]:
+    """Get directory information by ID."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM directories WHERE id = ?", (directory_id,)
+        )
+        return cursor.fetchone()
+
+
+def update_directory_file_count(directory_id: str) -> None:
+    """Update the file count for a directory."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) as count FROM files WHERE directory_id = ? AND expires_at >= ?",
+            (directory_id, time.time()),
+        )
+        count = cursor.fetchone()["count"]
+        conn.execute(
+            "UPDATE directories SET file_count = ? WHERE id = ?",
+            (count, directory_id),
+        )
+        conn.commit()
+
+
+def list_directory_files(directory_id: str) -> List[sqlite3.Row]:
+    """List all files in a directory."""
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            SELECT * FROM files 
+            WHERE directory_id = ? AND expires_at >= ?
+            ORDER BY uploaded_at DESC
+            """,
+            (directory_id, time.time()),
+        )
+        return cursor.fetchall()
+
+
+def download_file_from_url(url: str, timeout: int = 30) -> tuple[bytes, Optional[str]]:
+    """Download a file from a URL and return content and content-type."""
+
+    try:
+        response = requests.get(url, timeout=timeout, stream=True)
+        response.raise_for_status()
+
+        content = b""
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                content += chunk
+
+        content_type = response.headers.get("content-type")
+        return content, content_type
+    except requests.RequestException as error:
+        logger.error("url_download_failed url=%s error=%s", url, str(error))
+        raise
 
 
 def migrate_permanent_storage() -> None:
@@ -987,5 +1110,6 @@ logger = logging.getLogger("localhosting.storage")
 
 ensure_directories()
 init_db()
+init_directories_table()
 migrate_permanent_storage()
 backfill_direct_paths()
