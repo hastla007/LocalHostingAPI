@@ -479,6 +479,71 @@ def list_directory_files(directory_id: str) -> List[sqlite3.Row]:
         return cursor.fetchall()
 
 
+def list_directories(
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+) -> List[sqlite3.Row]:
+    """List all directories with sorting."""
+
+    with get_db() as conn:
+        sort_map = {
+            "name": "name",
+            "created_at": "created_at",
+            "file_count": "file_count",
+        }
+        column = sort_map.get(sort_by, "created_at")
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+
+        base_query = f"SELECT * FROM directories ORDER BY {column} {direction}"
+        params: List[int] = []
+
+        if limit is not None:
+            limit_value = max(int(limit), 0)
+            offset_value = max(int(offset), 0)
+            base_query += " LIMIT ? OFFSET ?"
+            params.extend([limit_value, offset_value])
+
+        cursor = conn.execute(base_query, tuple(params))
+        return cursor.fetchall()
+
+
+def count_directories() -> int:
+    """Count total directories."""
+
+    with get_db() as conn:
+        cursor = conn.execute("SELECT COUNT(*) AS count FROM directories")
+        row = cursor.fetchone()
+        return int(row["count"] if row and row["count"] is not None else 0)
+
+
+def delete_directory(directory_id: str) -> bool:
+    """Delete a directory and all its files."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        return False
+
+    files = list_directory_files(directory_id)
+
+    for file_row in files:
+        delete_file(file_row["id"])
+
+    with get_db() as conn:
+        conn.execute("DELETE FROM directories WHERE id = ?", (directory_id,))
+        conn.commit()
+
+    logger.info(
+        "directory_deleted directory_id=%s name=%s file_count=%d",
+        directory_id,
+        directory["name"],
+        len(files),
+    )
+    return True
+
+
 def download_file_from_url(url: str, timeout: int = 30) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type."""
 

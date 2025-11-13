@@ -151,8 +151,10 @@ from .storage import (
     cleanup_expired_files,
     cleanup_orphaned_files,
     cleanup_temp_files,
+    count_directories,
     count_files,
     create_directory,
+    delete_directory,
     delete_file,
     download_file_from_url,
     ensure_directories,
@@ -163,6 +165,7 @@ from .storage import (
     get_storage_statistics,
     get_storage_path,
     iter_files,
+    list_directories,
     list_directory_files,
     list_files,
     load_config,
@@ -3956,6 +3959,9 @@ def metrics():
 def create_directory_endpoint():
     """Create a new directory for grouping uploads."""
 
+    if request.method == "POST" and request.mimetype != "application/json" and not request.is_json:
+        return directories()
+
     try:
         if request.is_json:
             data = request.get_json() or {}
@@ -4497,14 +4503,207 @@ def _handle_direct_uploads(directory_id: str, rename_enabled: bool, config: dict
     )
 
 
-@app.route("/directories/<directory_id>", methods=["GET"])
+@app.route("/directories", methods=["GET", "POST"])
 @require_ui_auth
-def get_directory_info(directory_id: str):
-    """Get information about a directory and its files."""
+def directories():
+    """List all directories or create a new one."""
+
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        description = request.form.get("description", "").strip()
+
+        if not name:
+            flash("Directory name is required.", "error")
+            return redirect(url_for("directories"))
+
+        try:
+            directory_id = create_directory(name, description)
+            lifecycle_logger.info(
+                "directory_created_ui directory_id=%s name=%s",
+                directory_id,
+                sanitize_log_value(name),
+            )
+            flash(f"Directory '{name}' created successfully.", "success")
+            return redirect(url_for("view_directory", directory_id=directory_id))
+        except Exception as error:
+            lifecycle_logger.exception("directory_creation_failed_ui")
+            flash(f"Failed to create directory: {error}", "error")
+            return redirect(url_for("directories"))
+
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = request.args.get("per_page", 50, type=int)
+    per_page = max(1, min(per_page, 200))
+    sort_by = request.args.get("sort", "created_at")
+    sort_order = request.args.get("order", "desc").lower()
+
+    if sort_by not in {"name", "created_at", "file_count"}:
+        sort_by = "created_at"
+    sort_order = sort_order if sort_order in {"asc", "desc"} else "desc"
+
+    total_directories = count_directories()
+    total_pages = max(1, math.ceil(total_directories / per_page)) if total_directories else 1
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * per_page
+
+    directory_records = list_directories(
+        limit=per_page,
+        offset=offset,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+    directories_list = []
+    for record in directory_records:
+        update_directory_file_count(record["id"])
+        updated = get_directory(record["id"])
+        if not updated:
+            continue
+        directories_list.append(
+            {
+                "id": updated["id"],
+                "name": updated["name"],
+                "description": updated["description"],
+                "created_at": updated["created_at"],
+                "file_count": updated["file_count"],
+            }
+        )
+
+    return render_template(
+        "directories.html",
+        directories=directories_list,
+        page=page,
+        per_page=per_page,
+        total_directories=total_directories,
+        total_pages=total_pages,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@app.route("/directories/<directory_id>")
+@require_ui_auth
+def view_directory(directory_id: str):
+    """View a specific directory and its files."""
 
     directory = get_directory(directory_id)
     if not directory:
-        abort(404)
+        flash("Directory not found.", "error")
+        return redirect(url_for("directories"))
+
+    sort_by = request.args.get("sort", "uploaded_at")
+    sort_order = request.args.get("order", "desc").lower()
+
+    if sort_by not in {"name", "size", "uploaded_at", "expires_at"}:
+        sort_by = "uploaded_at"
+    sort_order = sort_order if sort_order in {"asc", "desc"} else "desc"
+
+    files = list_directory_files(directory_id)
+
+    reverse = sort_order == "desc"
+    if sort_by == "name":
+        files = sorted(files, key=lambda x: x["original_name"], reverse=reverse)
+    elif sort_by == "size":
+        files = sorted(files, key=lambda x: x["size"], reverse=reverse)
+    elif sort_by == "uploaded_at":
+        files = sorted(files, key=lambda x: x["uploaded_at"], reverse=reverse)
+    elif sort_by == "expires_at":
+        files = sorted(files, key=lambda x: x["expires_at"], reverse=reverse)
+
+    file_list = list(iter_files(files))
+
+    for file in file_list:
+        file["download_url"] = url_for("download", file_id=file["id"])
+        file["direct_download_url"] = url_for(
+            "direct_download", file_id=file["id"], filename=file["original_name"]
+        )
+        if file.get("raw_download_path"):
+            file["raw_download_url"] = url_for(
+                "serve_raw_file", direct_path=file["raw_download_path"]
+            )
+
+    return render_template(
+        "directory_detail.html",
+        directory={
+            "id": directory["id"],
+            "name": directory["name"],
+            "description": directory["description"],
+            "created_at": directory["created_at"],
+            "file_count": len(file_list),
+        },
+        files=file_list,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@app.route("/directories/<directory_id>/delete", methods=["POST"])
+@require_ui_auth
+def delete_directory_route(directory_id: str):
+    """Delete a directory and all its files."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        flash("Directory not found.", "error")
+        return redirect(url_for("directories"))
+
+    try:
+        delete_directory(directory_id)
+        lifecycle_logger.info(
+            "directory_deleted_ui directory_id=%s name=%s",
+            directory_id,
+            sanitize_log_value(directory["name"]),
+        )
+        flash(
+            f"Directory '{directory['name']}' and all its files have been deleted.",
+            "success",
+        )
+    except Exception as error:
+        lifecycle_logger.exception("directory_deletion_failed_ui")
+        flash(f"Failed to delete directory: {error}", "error")
+
+    return redirect(url_for("directories"))
+
+
+@app.route("/directories/<directory_id>/upload", methods=["GET", "POST"])
+@require_ui_auth
+def upload_to_directory_ui(directory_id: str):
+    """UI for uploading files to a directory."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        flash("Directory not found.", "error")
+        return redirect(url_for("directories"))
+
+    config = get_config()
+
+    return render_template(
+        "upload_to_directory.html",
+        directory={
+            "id": directory["id"],
+            "name": directory["name"],
+            "description": directory["description"],
+        },
+        config=config,
+        api_auth_enabled=bool(config.get("api_auth_enabled")),
+        api_ui_key=get_ui_api_key(config),
+        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024),
+    )
+
+
+@app.route("/directories/<directory_id>", methods=["GET"])
+def get_directory_info(directory_id: str):
+    """Get information about a directory (API endpoint)."""
+
+    directory = get_directory(directory_id)
+    if not directory:
+        if request.accept_mimetypes.accept_json:
+            return jsonify({"error": "Directory not found"}), 404
+        flash("Directory not found.", "error")
+        return redirect(url_for("directories"))
+
+    if request.accept_mimetypes.accept_html and not request.accept_mimetypes.accept_json:
+        return redirect(url_for("view_directory", directory_id=directory_id))
 
     files = list_directory_files(directory_id)
     file_list = list(iter_files(files))

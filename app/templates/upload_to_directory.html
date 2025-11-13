@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card upload-card">
+    <div style="margin-bottom: 1.5rem;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+        <a href="{{ url_for('directories') }}" style="color: #6b7280; text-decoration: none;">← Directories</a>
+        <span style="color: #6b7280;">/</span>
+        <a href="{{ url_for('view_directory', directory_id=directory.id) }}" style="color: #6b7280; text-decoration: none;">{{ directory.name }}</a>
+        <span style="color: #6b7280;">/</span>
+        <h2 style="margin: 0;">Upload Files</h2>
+      </div>
+      {% if directory.description %}
+        <p style="color: #6b7280;">{{ directory.description }}</p>
+      {% endif %}
+    </div>
+
+    <form
+      id="upload-form"
+      class="upload-form"
+      method="post"
+      action="{{ url_for('upload_to_directory', directory_id=directory.id) }}"
+      enctype="multipart/form-data"
+      data-api-auth-enabled="{{ 'true' if api_auth_enabled else 'false' }}"
+      data-api-key="{{ api_ui_key.key if api_ui_key and api_ui_key.has_plaintext else '' }}"
+      data-max-file-size="{{ max_upload_size }}"
+      data-directory-id="{{ directory.id }}"
+    >
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+
+      <div
+        id="drop-zone"
+        class="drop-zone"
+        tabindex="0"
+        role="button"
+        aria-label="Select or drop files to upload"
+      >
+        <input id="file-input" type="file" name="file" multiple class="visually-hidden" />
+        <div class="drop-zone-body">
+          <span class="drop-zone-icon">📁</span>
+          <button type="button" class="button secondary drop-zone-trigger" id="file-select-button">
+            Select File(s)
+          </button>
+          <p class="drop-zone-text">…or drag and drop files anywhere in this area.</p>
+          <p id="drop-zone-filename" class="drop-zone-file"></p>
+        </div>
+      </div>
+
+      <div class="form-row form-row-actions">
+        <label class="form-control">
+          <span>Storage Options</span>
+          <label for="permanent" class="checkbox-label" style="margin-top: 0.5rem;">
+            <input type="checkbox" id="permanent" name="permanent" value="true" />
+            Keep files permanently
+          </label>
+        </label>
+        <label class="form-control" id="retention-control">
+          <span>Retention (hours)</span>
+          <input
+            type="number"
+            id="retention_hours"
+            name="retention_hours"
+            step="0.1"
+            min="{{ config.retention_min_hours }}"
+            max="{{ config.retention_max_hours }}"
+            value="{{ config.retention_hours }}"
+            required
+          />
+        </label>
+        <button type="submit" class="button primary">
+          <span class="icon">⬆️</span>
+          <span class="label">Upload to Directory</span>
+        </button>
+      </div>
+    </form>
+
+    <div id="upload-progress" class="progress hidden">
+      <div id="upload-progress-bar" class="progress-bar"></div>
+    </div>
+    <div id="upload-status" class="status-message"></div>
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="{{ url_for('static', filename='upload.js') }}"></script>
+{% endblock %}
