@@ -503,14 +503,17 @@ def list_directories(
     """List all directories with sorting."""
 
     with get_db() as conn:
+        # Whitelist validation: column and direction are validated against allowed values
+        # before being used in the query. This prevents SQL injection.
         sort_map = {
             "name": "name",
             "created_at": "created_at",
             "file_count": "file_count",
         }
-        column = sort_map.get(sort_by, "created_at")
-        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+        column = sort_map.get(sort_by, "created_at")  # Whitelist: only allowed column names
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"  # Whitelist: only ASC or DESC
 
+        # SAFE: column and direction are from whitelisted values, not user input
         base_query = f"SELECT * FROM directories ORDER BY {column} {direction}"
         params: List[int] = []
 
@@ -559,6 +562,93 @@ def delete_directory(directory_id: str) -> bool:
     return True
 
 
+def _is_safe_url(url: str) -> tuple[bool, Optional[str]]:
+    """
+    Validate URL to prevent SSRF (Server-Side Request Forgery) attacks.
+
+    Blocks:
+    - Non-HTTP(S) schemes (file://, ftp://, etc.)
+    - Private IP addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    - Localhost addresses (127.0.0.0/8, ::1)
+    - Link-local addresses (169.254.0.0/16)
+    - Reserved IP ranges
+
+    Args:
+        url: The URL to validate
+
+    Returns:
+        tuple[bool, Optional[str]]: (is_safe, error_message)
+    """
+    try:
+        parsed = urlparse(url)
+
+        # Block non-HTTP(S) schemes to prevent file:// and other protocol exploits
+        if parsed.scheme not in ('http', 'https'):
+            return False, f"Unsupported URL scheme: {parsed.scheme}. Only http and https are allowed."
+
+        # Validate hostname exists
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Invalid URL: missing hostname"
+
+        # Resolve hostname to IP address and validate
+        try:
+            # Get all IP addresses for the hostname (handles both IPv4 and IPv6)
+            addr_info = socket.getaddrinfo(hostname, None)
+
+            for family, _, _, _, sockaddr in addr_info:
+                ip_str = sockaddr[0]
+
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+
+                    # Block private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+                    if ip.is_private:
+                        return False, f"Access to private IP addresses is not allowed: {ip}"
+
+                    # Block loopback addresses (127.0.0.0/8, ::1)
+                    if ip.is_loopback:
+                        return False, f"Access to loopback addresses is not allowed: {ip}"
+
+                    # Block link-local addresses (169.254.0.0/16, fe80::/10)
+                    if ip.is_link_local:
+                        return False, f"Access to link-local addresses is not allowed: {ip}"
+
+                    # Block reserved IP ranges
+                    if ip.is_reserved:
+                        return False, f"Access to reserved IP addresses is not allowed: {ip}"
+
+                    # Block multicast addresses
+                    if ip.is_multicast:
+                        return False, f"Access to multicast addresses is not allowed: {ip}"
+
+                except ValueError:
+                    # IP address parsing failed, skip this one
+                    continue
+
+        except socket.gaierror as e:
+            return False, f"Could not resolve hostname '{hostname}': {str(e)}"
+        except OSError as e:
+            return False, f"Network error resolving hostname '{hostname}': {str(e)}"
+
+        # Additional protection: block certain dangerous hostnames
+        dangerous_hostnames = [
+            'localhost',
+            'metadata.google.internal',  # GCP metadata service
+            '169.254.169.254',  # AWS/Azure metadata service IP
+        ]
+
+        hostname_lower = hostname.lower()
+        for dangerous in dangerous_hostnames:
+            if hostname_lower == dangerous or hostname_lower.endswith('.' + dangerous):
+                return False, f"Access to hostname '{hostname}' is not allowed for security reasons"
+
+        return True, None
+
+    except Exception as e:
+        return False, f"Invalid URL: {str(e)}"
+
+
 def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type.
 
@@ -602,6 +692,31 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DE
                 content += chunk
 
         content_type = response.headers.get("content-type")
+
+        # Validate content type for security
+        if content_type:
+            content_type_lower = content_type.lower().split(';')[0].strip()
+
+            # Block dangerous executable content types
+            dangerous_types = [
+                'application/x-executable',
+                'application/x-msdownload',
+                'application/x-msdos-program',
+                'application/x-sh',
+                'application/x-csh',
+                'application/x-bat',
+                'application/x-apple-diskimage',
+                'application/vnd.microsoft.portable-executable',
+            ]
+
+            if content_type_lower in dangerous_types:
+                logger.warning(
+                    "url_blocked_dangerous_content url=%s content_type=%s",
+                    url,
+                    content_type_lower
+                )
+                raise ValueError(f"Blocked dangerous content type: {content_type_lower}")
+
         return content, content_type
     except requests.RequestException as error:
         logger.error("url_download_failed url=%s error=%s", url, str(error))
