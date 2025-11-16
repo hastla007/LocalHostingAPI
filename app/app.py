@@ -1237,6 +1237,11 @@ def download_rate_limit_string() -> str:
     return f"{value} per minute"
 
 
+def api_rate_limit_string() -> str:
+    """Rate limit for general API endpoints (200 per minute)."""
+    return "200 per minute"
+
+
 app.config["MAX_CONTENT_LENGTH"] = int(
     _coerce_positive_int(_CONFIG_CACHE.get("max_upload_size_mb"), 500) * 1024 * 1024
 )
@@ -2579,29 +2584,32 @@ def fileupload():
             )
             successful_uploads.append((file_id, stored_name))
 
-        if failures:
-            failed_rollbacks = rollback_successful_uploads(successful_uploads)
-            if failed_rollbacks:
-                lifecycle_logger.error(
-                    "rollback_incomplete file_ids=%s",
-                    [sanitize_log_value(value) for value in failed_rollbacks],
-                )
+        if failures and not results:
+            # All uploads failed
             if any(entry.get("reason") == "quota_exceeded" for entry in failures):
                 status = 507
             elif any(entry.get("reason") == "too_large" for entry in failures):
                 status = 413
             else:
                 status = 400
-            payload: Dict[str, Any] = {
-                "message": "Failed to upload files.",
+            return jsonify({
+                "message": "All file uploads failed.",
                 "errors": failures,
+            }), status
+
+        if failures:
+            # Partial success: some uploads succeeded, some failed
+            status = 207  # Multi-Status
+            payload: Dict[str, Any] = {
+                "message": f"Partial success: {len(results)} file(s) uploaded, {len(failures)} failed.",
+                "errors": failures,
+                "successful": len(results),
+                "files": results,
             }
-            if failed_rollbacks:
-                payload["rollback_failed_ids"] = failed_rollbacks
             return jsonify(payload), status
 
         if not results:
-            return jsonify({"message": "Failed to upload files.", "errors": []}), 400
+            return jsonify({"message": "No files were uploaded.", "errors": []}), 400
 
         if len(results) == 1:
             return jsonify(results[0]), 201
@@ -3824,6 +3832,7 @@ def s3_put_object(bucket: str, key: str):
 
 
 @app.route("/metrics")
+@limiter.limit(lambda: api_rate_limit_string())
 @require_ui_auth
 def metrics():
     """Display comprehensive system and usage metrics."""
@@ -3889,37 +3898,33 @@ def metrics():
             }
         )
 
-    retention_breakdown = {
-        "permanent": 0,
-        "less_1h": 0,
-        "1h_to_6h": 0,
-        "6h_to_24h": 0,
-        "1d_to_7d": 0,
-        "more_7d": 0,
-    }
-
+    # Optimized retention breakdown query using SQL aggregation
     current_time = time.time()
     with get_db() as conn:
         cursor = conn.execute(
-            "SELECT expires_at, permanent FROM files WHERE expires_at >= ?",
-            (current_time,),
+            """
+            SELECT
+                SUM(CASE WHEN permanent = 1 THEN 1 ELSE 0 END) as permanent,
+                SUM(CASE WHEN permanent = 0 AND (expires_at - ?) / 3600 < 1 THEN 1 ELSE 0 END) as less_1h,
+                SUM(CASE WHEN permanent = 0 AND (expires_at - ?) / 3600 >= 1 AND (expires_at - ?) / 3600 < 6 THEN 1 ELSE 0 END) as "1h_to_6h",
+                SUM(CASE WHEN permanent = 0 AND (expires_at - ?) / 3600 >= 6 AND (expires_at - ?) / 3600 < 24 THEN 1 ELSE 0 END) as "6h_to_24h",
+                SUM(CASE WHEN permanent = 0 AND (expires_at - ?) / 3600 >= 24 AND (expires_at - ?) / 3600 < 168 THEN 1 ELSE 0 END) as "1d_to_7d",
+                SUM(CASE WHEN permanent = 0 AND (expires_at - ?) / 3600 >= 168 THEN 1 ELSE 0 END) as more_7d
+            FROM files
+            WHERE expires_at >= ?
+            """,
+            (current_time, current_time, current_time, current_time, current_time, current_time, current_time, current_time, current_time),
         )
-        for row in cursor:
-            if row["permanent"]:
-                retention_breakdown["permanent"] += 1
-                continue
+        row = cursor.fetchone()
 
-            hours_remaining = (row["expires_at"] - current_time) / 3600
-            if hours_remaining < 1:
-                retention_breakdown["less_1h"] += 1
-            elif hours_remaining < 6:
-                retention_breakdown["1h_to_6h"] += 1
-            elif hours_remaining < 24:
-                retention_breakdown["6h_to_24h"] += 1
-            elif hours_remaining < 168:
-                retention_breakdown["1d_to_7d"] += 1
-            else:
-                retention_breakdown["more_7d"] += 1
+    retention_breakdown = {
+        "permanent": int(row["permanent"] or 0),
+        "less_1h": int(row["less_1h"] or 0),
+        "1h_to_6h": int(row["1h_to_6h"] or 0),
+        "6h_to_24h": int(row["6h_to_24h"] or 0),
+        "1d_to_7d": int(row["1d_to_7d"] or 0),
+        "more_7d": int(row["more_7d"] or 0),
+    }
 
     config = get_config()
     config_snapshot = {
@@ -4125,7 +4130,25 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 sanitize_log_value(url),
                 directory_id,
             )
-            content, content_type = download_file_from_url(url)
+            max_bytes = app.config.get("MAX_CONTENT_LENGTH") or 500 * 1024 * 1024
+            content, content_type = download_file_from_url(url, max_size_bytes=max_bytes)
+        except ValueError as error:
+            # File too large
+            lifecycle_logger.warning(
+                "url_download_size_exceeded url=%s error=%s",
+                sanitize_log_value(url),
+                str(error),
+            )
+            failures.append(
+                {
+                    "index": idx,
+                    "url": url,
+                    "filename": filename,
+                    "reason": "too_large",
+                    "detail": str(error),
+                }
+            )
+            continue
         except Exception as error:
             lifecycle_logger.exception(
                 "url_download_failed url=%s", sanitize_log_value(url)
@@ -4141,18 +4164,6 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
             continue
 
         size = len(content)
-        max_bytes = app.config.get("MAX_CONTENT_LENGTH")
-        if max_bytes and size > max_bytes:
-            failures.append(
-                {
-                    "index": idx,
-                    "url": url,
-                    "filename": filename,
-                    "reason": "too_large",
-                    "detail": f"File size {size} exceeds limit {max_bytes}",
-                }
-            )
-            continue
 
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
@@ -4241,6 +4252,8 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
             )
 
             metadata_fields: Dict[str, object] = {}
+            # Maximum size for metadata fields to prevent abuse (1000 characters per field)
+            MAX_METADATA_FIELD_SIZE = 1000
             for key in [
                 "title",
                 "artist",
@@ -4252,7 +4265,18 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 "description",
             ]:
                 if key in file_entry and file_entry[key]:
-                    metadata_fields[key] = file_entry[key]
+                    value = file_entry[key]
+                    # Validate metadata field size
+                    if isinstance(value, str) and len(value) > MAX_METADATA_FIELD_SIZE:
+                        lifecycle_logger.warning(
+                            "metadata_field_too_large file_id=%s key=%s size=%d",
+                            file_id,
+                            key,
+                            len(value),
+                        )
+                        # Truncate to maximum size
+                        value = value[:MAX_METADATA_FIELD_SIZE]
+                    metadata_fields[key] = value
 
             if metadata_fields:
                 update_file_metadata(file_id, metadata_fields)
@@ -4288,20 +4312,27 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
 
     update_directory_file_count(directory_id)
 
+    if failures and not results:
+        # All uploads failed
+        return jsonify({
+            "message": "All file uploads failed.",
+            "errors": failures,
+            "successful": 0,
+        }), 400
+
     if failures:
-        failed_rollbacks = rollback_successful_uploads(successful_uploads)
-        status = 400
+        # Partial success: some uploads succeeded, some failed
+        status = 207  # Multi-Status
         payload = {
-            "message": f"Failed to upload {len(failures)} file(s).",
+            "message": f"Partial success: {len(results)} file(s) uploaded, {len(failures)} failed.",
             "errors": failures,
             "successful": len(results),
+            "files": results,
         }
-        if failed_rollbacks:
-            payload["rollback_failed_ids"] = failed_rollbacks
         return jsonify(payload), status
 
     if not results:
-        return jsonify({"message": "No files were uploaded.", "errors": failures}), 400
+        return jsonify({"message": "No files were uploaded.", "errors": []}), 400
 
     return (
         jsonify(
@@ -4523,10 +4554,11 @@ def _handle_direct_uploads(directory_id: str, rename_enabled: bool, config: dict
     )
 
 
-@app.route("/directories", methods=["GET", "POST"])
+@app.route("/directories", methods=["GET"])
+@limiter.limit(lambda: api_rate_limit_string())
 @require_ui_auth
 def directories():
-    """List all directories or create a new one."""
+    """List all directories."""
 
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -4573,19 +4605,49 @@ def directories():
         sort_order=sort_order,
     )
 
+    # Batch update file counts to avoid N+1 queries
+    directory_ids = [record["id"] for record in directory_records]
+    if directory_ids:
+        current_time = time.time()
+        with get_db() as conn:
+            # Get current file counts for all directories in one query
+            placeholders = ",".join("?" * len(directory_ids))
+            cursor = conn.execute(
+                f"""
+                SELECT directory_id, COUNT(*) as count
+                FROM files
+                WHERE directory_id IN ({placeholders}) AND expires_at >= ?
+                GROUP BY directory_id
+                """,
+                (*directory_ids, current_time),
+            )
+            file_counts = {row["directory_id"]: row["count"] for row in cursor.fetchall()}
+
+            # Update all directories in batch
+            for dir_id, count in file_counts.items():
+                conn.execute(
+                    "UPDATE directories SET file_count = ? WHERE id = ?",
+                    (count, dir_id),
+                )
+            # Set count to 0 for directories with no files
+            for dir_id in directory_ids:
+                if dir_id not in file_counts:
+                    conn.execute(
+                        "UPDATE directories SET file_count = 0 WHERE id = ?",
+                        (dir_id,),
+                    )
+            conn.commit()
+
+    # Use the already-fetched records instead of re-querying
     directories_list = []
     for record in directory_records:
-        update_directory_file_count(record["id"])
-        updated = get_directory(record["id"])
-        if not updated:
-            continue
         directories_list.append(
             {
-                "id": updated["id"],
-                "name": updated["name"],
-                "description": updated["description"],
-                "created_at": updated["created_at"],
-                "file_count": updated["file_count"],
+                "id": record["id"],
+                "name": record["name"],
+                "description": record["description"],
+                "created_at": record["created_at"],
+                "file_count": record["file_count"],
             }
         )
 
@@ -4601,15 +4663,43 @@ def directories():
     )
 
 
-@app.route("/directories/<directory_id>")
-@require_ui_auth
+@app.route("/directories/<directory_id>", methods=["GET"])
+@limiter.limit(lambda: api_rate_limit_string())
 def view_directory(directory_id: str):
-    """View a specific directory and its files."""
+    """View a specific directory and its files (UI and API)."""
 
     directory = get_directory(directory_id)
     if not directory:
+        # Check if request expects JSON (API) or HTML (UI)
+        if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+            return jsonify({"error": "Directory not found"}), 404
         flash("Directory not found.", "error")
         return redirect(url_for("directories"))
+
+    files = list_directory_files(directory_id)
+    file_list = list(iter_files(files))
+
+    # If JSON is requested (API mode), return JSON response
+    if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+        return jsonify(
+            {
+                "directory_id": directory["id"],
+                "name": directory["name"],
+                "description": directory["description"],
+                "created_at": directory["created_at"],
+                "created_at_iso": isoformat_utc(directory["created_at"]),
+                "file_count": len(file_list),
+                "files": file_list,
+            }
+        )
+
+    # Otherwise, render HTML for UI
+    # Check UI auth for HTML requests only
+    from flask import session
+    config = get_config()
+    if config.get("ui_auth_enabled") and not session.get("ui_authenticated"):
+        flash("Please log in to continue.", "error")
+        return redirect(url_for("login"))
 
     sort_by = request.args.get("sort", "uploaded_at")
     sort_order = request.args.get("order", "desc").lower()
@@ -4617,8 +4707,6 @@ def view_directory(directory_id: str):
     if sort_by not in {"name", "size", "uploaded_at", "expires_at"}:
         sort_by = "uploaded_at"
     sort_order = sort_order if sort_order in {"asc", "desc"} else "desc"
-
-    files = list_directory_files(directory_id)
 
     reverse = sort_order == "desc"
     if sort_by == "name":
@@ -4658,6 +4746,7 @@ def view_directory(directory_id: str):
 
 
 @app.route("/directories/<directory_id>/delete", methods=["POST"])
+@limiter.limit(lambda: api_rate_limit_string())
 @require_ui_auth
 def delete_directory_route(directory_id: str):
     """Delete a directory and all its files."""
@@ -4711,38 +4800,9 @@ def upload_to_directory_ui(directory_id: str):
     )
 
 
-@app.route("/directories/<directory_id>", methods=["GET"])
-def get_directory_info(directory_id: str):
-    """Get information about a directory (API endpoint)."""
-
-    directory = get_directory(directory_id)
-    if not directory:
-        if request.accept_mimetypes.accept_json:
-            return jsonify({"error": "Directory not found"}), 404
-        flash("Directory not found.", "error")
-        return redirect(url_for("directories"))
-
-    if request.accept_mimetypes.accept_html and not request.accept_mimetypes.accept_json:
-        return redirect(url_for("view_directory", directory_id=directory_id))
-
-    files = list_directory_files(directory_id)
-    file_list = list(iter_files(files))
-
-    return jsonify(
-        {
-            "directory_id": directory["id"],
-            "name": directory["name"],
-            "description": directory["description"],
-            "created_at": directory["created_at"],
-            "created_at_iso": isoformat_utc(directory["created_at"]),
-            "file_count": len(file_list),
-            "files": file_list,
-        }
-    )
-
-
 @csrf.exempt
 @app.route("/files/<file_id>/metadata", methods=["GET", "PUT", "PATCH"])
+@limiter.limit(lambda: api_rate_limit_string())
 @require_api_auth()
 def file_metadata(file_id: str):
     """Get or update file metadata."""
@@ -4778,7 +4838,17 @@ def file_metadata(file_id: str):
     if invalid_keys:
         return jsonify({"error": "Invalid metadata keys"}), 400
 
-    success = update_file_metadata(file_id, metadata_payload)
+    # Validate metadata value sizes (max 1000 characters per field)
+    MAX_METADATA_FIELD_SIZE = 1000
+    validated_metadata = {}
+    for key, value in metadata_payload.items():
+        if isinstance(value, str) and len(value) > MAX_METADATA_FIELD_SIZE:
+            return jsonify({
+                "error": f"Metadata field '{key}' exceeds maximum size of {MAX_METADATA_FIELD_SIZE} characters"
+            }), 400
+        validated_metadata[key] = value
+
+    success = update_file_metadata(file_id, validated_metadata)
     if not success:
         return jsonify({"error": "Failed to update metadata"}), 500
 
