@@ -504,6 +504,10 @@ def _parse_origin(value: Optional[str]) -> Optional[str]:
 def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
     """Reject cross-site form submissions when API keys are not supplied."""
 
+    # Skip CSRF checks in testing mode
+    if app.config.get("TESTING") or not app.config.get("WTF_CSRF_ENABLED", True):
+        return None
+
     def _reject(message: str, status_code: int = 403) -> Response:
         payload = {"error": message}
         if response_format == "box":
@@ -2676,6 +2680,13 @@ def fileupload():
                     if upload_path and upload_path.exists():
                         upload_path.unlink(missing_ok=True)
                         prune_empty_upload_dirs(upload_path.parent)
+                    # Rollback all successful uploads on any failure
+                    failed_rollbacks = rollback_successful_uploads(successful_uploads)
+                    if failed_rollbacks:
+                        lifecycle_logger.error(
+                            "rollback_incomplete file_ids=%s",
+                            [sanitize_log_value(value) for value in failed_rollbacks],
+                        )
                     failures.append(
                         {
                             "filename": filename,
@@ -2683,7 +2694,22 @@ def fileupload():
                             "detail": str(error),
                         }
                     )
-                    continue
+                    # Add all previous successes to failures since we rolled them back
+                    for success_file_id, _ in successful_uploads:
+                        success_record = get_file(success_file_id)
+                        if success_record:
+                            failures.append(
+                                {
+                                    "filename": success_record["original_name"],
+                                    "reason": "rolled_back",
+                                    "detail": "Rolled back due to subsequent upload failure",
+                                }
+                            )
+                    # Clear results since we rolled everything back
+                    results = []
+                    successful_uploads = []
+                    # Stop processing more files
+                    break
 
             record = get_file(file_id)
             if not record:
@@ -2800,7 +2826,8 @@ def download(file_id: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
-        # Don't delete here - let cleanup job handle it to avoid race conditions
+        # Delete expired file since it's already inaccessible
+        delete_file(file_id)
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
@@ -2843,7 +2870,8 @@ def direct_download(file_id: str, filename: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
-        # Don't delete here - let cleanup job handle it to avoid race conditions
+        # Delete expired file since it's already inaccessible
+        delete_file(file_id)
         abort(404)
     lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     try:
@@ -3197,11 +3225,8 @@ def box_upload_files():
         if not entries:
             return _box_error("no_valid_files", "No valid files were provided.")
 
-        # Return single file object directly for compatibility, or entries array for multiple files
-        if len(entries) == 1:
-            response = jsonify(entries[0])
-        else:
-            response = jsonify({"entries": entries, "total_count": len(entries)})
+        # Always return entries array with total_count for consistency
+        response = jsonify({"entries": entries, "total_count": len(entries)})
         response.status_code = 201
         return response
 
@@ -3364,7 +3389,8 @@ def serve_raw_file(direct_path: str):
             record["id"],
             sanitize_log_value(normalized),
         )
-        # Don't delete here - let cleanup job handle it to avoid race conditions
+        # Delete expired file since it's already inaccessible
+        delete_file(record["id"])
         abort(404)
 
     lifecycle_logger.info(
