@@ -960,10 +960,11 @@ def get_config(refresh: bool = False) -> Dict[str, Any]:
         if has_request_context():
             cached = getattr(g, "_app_config", None)
             if cached is None or refresh:
-                g._app_config = _CONFIG_CACHE
+                g._app_config = _CONFIG_CACHE.copy()  # Make a copy to avoid race conditions
             config = g._app_config
         else:
-            config = _CONFIG_CACHE
+            # Make a copy to prevent race conditions when applying settings outside lock
+            config = _CONFIG_CACHE.copy()
 
     _apply_runtime_settings(config)
     return config
@@ -1685,8 +1686,10 @@ def resolve_retention(config: dict, *candidates: Optional[str]) -> float:
     try:
         retention = float(chosen)
 
-        if retention != retention:  # NaN guard
-            raise ValueError("NaN not allowed")
+        # Check for NaN and infinity
+        import math
+        if math.isnan(retention) or math.isinf(retention):
+            raise ValueError("Invalid retention value: must be a finite number")
         if not (0 <= retention <= 8760):
             raise ValueError("Retention must be between 0 and 8760 hours")
     except (TypeError, ValueError) as error:
@@ -2851,12 +2854,7 @@ def download(file_id: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
-        # Delete expired file since it's already inaccessible
-        try:
-            if not delete_file(file_id):
-                lifecycle_logger.warning("failed_to_delete_expired_file file_id=%s", file_id)
-        except Exception as e:
-            lifecycle_logger.exception("exception_deleting_expired_file file_id=%s error=%s", file_id, str(e))
+        # Let the cleanup job handle deletion to avoid race conditions
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
@@ -2907,8 +2905,7 @@ def direct_download(file_id: str, filename: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
-        # Delete expired file since it's already inaccessible
-        delete_file(file_id)
+        # Let the cleanup job handle deletion to avoid race conditions
         abort(404)
     lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     try:
@@ -3439,8 +3436,7 @@ def serve_raw_file(direct_path: str):
             record["id"],
             sanitize_log_value(normalized),
         )
-        # Delete expired file since it's already inaccessible
-        delete_file(record["id"])
+        # Let the cleanup job handle deletion to avoid race conditions
         abort(404)
 
     lifecycle_logger.info(
@@ -3450,8 +3446,9 @@ def serve_raw_file(direct_path: str):
     )
     mimetype = record["content_type"] or None
     try:
+        # Use resolved_path to prevent TOCTOU symlink attacks
         return send_file(
-            file_path,
+            resolved_path,
             as_attachment=False,
             download_name=record["original_name"],
             mimetype=mimetype,
