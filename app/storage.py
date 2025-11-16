@@ -1135,6 +1135,7 @@ def register_file(
     retention_hours: float,
     file_id: Optional[str] = None,
     permanent: bool = False,
+    directory_id: Optional[str] = None,
 ) -> str:
     file_id = file_id or str(uuid.uuid4())
     uploaded_at = time.time()
@@ -1173,9 +1174,10 @@ def register_file(
                         uploaded_at,
                         expires_at,
                         direct_path,
-                        permanent
+                        permanent,
+                        directory_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         file_id,
@@ -1187,6 +1189,7 @@ def register_file(
                         expires_at,
                         direct_path,
                         permanent_flag,
+                        directory_id,
                     ),
                 )
             # Only add to pending_paths AFTER successful insertion
@@ -1206,6 +1209,7 @@ def register_file(
                     uploaded_at,
                     expires_at,
                     permanent_flag,
+                    directory_id,
                 )
                 fallback_base = secure_filename(original_name) or "file"
                 fallback_options = [
@@ -1230,11 +1234,12 @@ def register_file(
                                     uploaded_at,
                                     expires_at,
                                     direct_path,
-                                    permanent
+                                    permanent,
+                                    directory_id
                                 )
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
-                                base_params[:-1] + (fallback_candidate, base_params[-1]),
+                                base_params[:-2] + (fallback_candidate, base_params[-2], base_params[-1]),
                             )
                         direct_path = fallback_candidate
                         inserted = True

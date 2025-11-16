@@ -306,6 +306,35 @@ def sanitize_log_value(value: Any) -> Any:
     return value
 
 
+def sanitize_error_message(error: Exception) -> str:
+    """
+    Sanitize error messages for API responses to prevent information disclosure.
+
+    Removes sensitive information like file paths, database details, and stack traces.
+
+    Args:
+        error: The exception object
+
+    Returns:
+        A sanitized error message safe for client consumption
+    """
+    error_str = str(error)
+
+    # Remove file paths (both Unix and Windows style)
+    error_str = re.sub(r'[/\\][\w/\\.-]+\.(py|db|txt|json|log)', '[PATH]', error_str)
+    error_str = re.sub(r'[/\\][\w/\\.-]+[/\\]', '[PATH]/', error_str)
+
+    # Remove SQLite error details that might reveal schema
+    if 'sqlite' in error_str.lower() or 'database' in error_str.lower():
+        return "Database operation failed"
+
+    # Limit length to prevent information leakage
+    if len(error_str) > 100:
+        error_str = error_str[:100]
+
+    return error_str
+
+
 def _get_object_size(obj: Any, seen: Optional[Set[int]] = None, depth: int = 0, max_depth: int = 100) -> int:
     """
     Recursively calculate approximate size of an object in bytes.
@@ -318,10 +347,13 @@ def _get_object_size(obj: Any, seen: Optional[Set[int]] = None, depth: int = 0, 
 
     Returns:
         Approximate size in bytes
+
+    Raises:
+        ValueError: If object nesting depth exceeds max_depth
     """
-    # Prevent stack overflow with deeply nested objects
+    # Reject deeply nested objects to prevent size limit bypass
     if depth > max_depth:
-        return sys.getsizeof(obj)
+        raise ValueError(f"Object nesting depth exceeds maximum of {max_depth} levels")
 
     size = sys.getsizeof(obj)
     if seen is None:
@@ -1568,6 +1600,7 @@ def add_security_headers(response: Response):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     csp = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
@@ -2810,7 +2843,7 @@ def fileupload():
                         {
                             "filename": filename,
                             "reason": "internal_error",
-                            "detail": str(error),
+                            "detail": sanitize_error_message(error),
                         }
                     )
                     # Add all previous successes to failures since we rolled them back
@@ -4449,7 +4482,7 @@ def create_directory_endpoint():
             jsonify(
                 {
                     "error": "Failed to create directory",
-                    "detail": str(error),
+                    "detail": sanitize_error_message(error),
                 }
             ),
             500,
@@ -4589,7 +4622,7 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                     "url": url,
                     "filename": filename,
                     "reason": "too_large",
-                    "detail": str(error),
+                    "detail": sanitize_error_message(error),
                 }
             )
             # Clean up any partial download
@@ -4626,14 +4659,8 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                         retention_hours=retention_hours,
                         file_id=file_id,
                         permanent=permanent,
+                        directory_id=directory_id,
                     )
-
-                    with get_db() as conn:
-                        conn.execute(
-                            "UPDATE files SET directory_id = ? WHERE id = ?",
-                            (directory_id, file_id),
-                        )
-                        conn.commit()
 
             except StorageQuotaExceededError:
                 upload_path.unlink(missing_ok=True)
@@ -4677,24 +4704,8 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 else ""
             )
 
-            results.append(
-                {
-                    "id": file_id,
-                    "filename": filename,
-                    "size": size,
-                    "original_url": url,
-                    "title": title if title else None,
-                    "download_url": download_url,
-                    "direct_download_url": direct_download_url,
-                    "raw_download_url": raw_download_url,
-                    "retention_hours": retention_hours if not permanent else None,
-                    "permanent": permanent,
-                    "uploaded_at": record["uploaded_at"],
-                    "expires_at": record["expires_at"],
-                }
-            )
-
             metadata_fields: Dict[str, object] = {}
+            metadata_warnings: List[str] = []
             # Maximum size for metadata fields to prevent abuse (1000 characters per field)
             MAX_METADATA_FIELD_SIZE = 1000
             for key in [
@@ -4717,12 +4728,33 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                             key,
                             len(value),
                         )
-                        # Truncate to maximum size
+                        # Truncate to maximum size and warn user
                         value = value[:MAX_METADATA_FIELD_SIZE]
+                        metadata_warnings.append(
+                            f"Field '{key}' was truncated to {MAX_METADATA_FIELD_SIZE} characters"
+                        )
                     metadata_fields[key] = value
 
             if metadata_fields:
                 update_file_metadata(file_id, metadata_fields)
+
+            result_entry = {
+                "id": file_id,
+                "filename": filename,
+                "size": size,
+                "original_url": url,
+                "title": title if title else None,
+                "download_url": download_url,
+                "direct_download_url": direct_download_url,
+                "raw_download_url": raw_download_url,
+                "retention_hours": retention_hours if not permanent else None,
+                "permanent": permanent,
+                "uploaded_at": record["uploaded_at"],
+                "expires_at": record["expires_at"],
+            }
+            if metadata_warnings:
+                result_entry["warnings"] = metadata_warnings
+            results.append(result_entry)
 
             successful_uploads.append((file_id, stored_name))
 
@@ -4882,14 +4914,8 @@ def _handle_direct_uploads(directory_id: str, rename_enabled: bool, config: dict
                         retention_hours=retention_hours,
                         file_id=file_id,
                         permanent=permanent,
+                        directory_id=directory_id,
                     )
-
-                    with get_db() as conn:
-                        conn.execute(
-                            "UPDATE files SET directory_id = ? WHERE id = ?",
-                            (directory_id, file_id),
-                        )
-                        conn.commit()
 
             except (ValueError, StorageQuotaExceededError) as error:
                 if temp_path.exists():
@@ -5018,11 +5044,11 @@ def directories():
                 directory_id,
                 sanitize_log_value(name),
             )
-            flash(f"Directory '{name}' created successfully.", "success")
+            flash(f"Directory '{escape(name)}' created successfully.", "success")
             return redirect(url_for("view_directory", directory_id=directory_id))
         except Exception as error:
             lifecycle_logger.exception("directory_creation_failed_ui")
-            flash(f"Failed to create directory: {error}", "error")
+            flash(f"Failed to create directory: {escape(str(error))}", "error")
             return redirect(url_for("directories"))
 
     page = max(request.args.get("page", 1, type=int), 1)
@@ -5218,7 +5244,7 @@ def delete_directory_route(directory_id: str):
         )
     except Exception as error:
         lifecycle_logger.exception("directory_deletion_failed_ui")
-        flash(f"Failed to delete directory: {error}", "error")
+        flash(f"Failed to delete directory: {escape(str(error))}", "error")
 
     return redirect(url_for("directories"))
 
@@ -5294,7 +5320,12 @@ def file_metadata(file_id: str):
 
     for key, value in metadata_payload.items():
         # Check size of each field (handles strings, dicts, lists, etc.)
-        value_size = _get_object_size(value)
+        try:
+            value_size = _get_object_size(value)
+        except ValueError as e:
+            return jsonify({
+                "error": f"Metadata field '{key}' is too deeply nested: {str(e)}"
+            }), 400
         if value_size > MAX_METADATA_FIELD_SIZE:
             return jsonify({
                 "error": f"Metadata field '{key}' is too large ({value_size} bytes, max {MAX_METADATA_FIELD_SIZE} bytes)"
@@ -5302,7 +5333,12 @@ def file_metadata(file_id: str):
         validated_metadata[key] = value
 
     # Check total metadata size
-    total_size = _get_object_size(validated_metadata)
+    try:
+        total_size = _get_object_size(validated_metadata)
+    except ValueError as e:
+        return jsonify({
+            "error": f"Metadata structure is too deeply nested: {str(e)}"
+        }), 400
     if total_size > MAX_METADATA_TOTAL_SIZE:
         return jsonify({
             "error": f"Total metadata size ({total_size} bytes) exceeds limit of {MAX_METADATA_TOTAL_SIZE} bytes"
