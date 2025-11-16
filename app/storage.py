@@ -440,6 +440,17 @@ def init_directories_table() -> None:
 def create_directory(name: str, description: Optional[str] = None) -> str:
     """Create a new directory for grouping files."""
 
+    # Validate inputs
+    if not name or not name.strip():
+        raise ValueError("Directory name cannot be empty")
+
+    name = name.strip()
+    if len(name) > 255:
+        raise ValueError("Directory name must be 255 characters or less")
+
+    if description and len(description) > 1000:
+        raise ValueError("Description must be 1000 characters or less")
+
     directory_id = str(uuid.uuid4())
     created_at = time.time()
 
