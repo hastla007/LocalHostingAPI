@@ -1,8 +1,10 @@
 import importlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import os
+import socket
 import sqlite3
 import time
 import hashlib
@@ -10,7 +12,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Generator
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from flask import g, has_request_context
 
@@ -56,22 +58,25 @@ def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
 
-DEFAULT_MAX_UPLOAD_MB = max(1, int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500")))
-DEFAULT_MAX_CONCURRENT_UPLOADS = max(
-    1, int(os.environ.get("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", "10"))
-)
-DEFAULT_CLEANUP_INTERVAL_MINUTES = max(
-    1, int(os.environ.get("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", "5"))
-)
-DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", "100"))
-)
-DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", "10"))
-)
-DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", "120"))
-)
+def _safe_int_env(key: str, default: int, min_value: int = 1) -> int:
+    """Safely parse integer environment variable with error handling."""
+    try:
+        return max(min_value, int(os.environ.get(key, str(default))))
+    except (TypeError, ValueError) as e:
+        logger = logging.getLogger("localhosting.config")
+        logger.warning(
+            "Invalid value for %s: %s. Using default: %d",
+            key, os.environ.get(key), default
+        )
+        return default
+
+
+DEFAULT_MAX_UPLOAD_MB = _safe_int_env("MAX_UPLOAD_SIZE_MB", 500)
+DEFAULT_MAX_CONCURRENT_UPLOADS = _safe_int_env("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", 10)
+DEFAULT_CLEANUP_INTERVAL_MINUTES = _safe_int_env("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", 5)
+DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR = _safe_int_env("LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", 100)
+DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = _safe_int_env("LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", 10)
+DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE = _safe_int_env("LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", 120)
 
 
 DEFAULT_CONFIG = {
@@ -457,14 +462,18 @@ def update_directory_file_count(directory_id: str) -> None:
     """Update the file count for a directory."""
 
     with get_db() as conn:
-        cursor = conn.execute(
-            "SELECT COUNT(*) as count FROM files WHERE directory_id = ? AND expires_at >= ?",
-            (directory_id, time.time()),
-        )
-        count = cursor.fetchone()["count"]
+        # Use atomic UPDATE with subquery to avoid race conditions
         conn.execute(
-            "UPDATE directories SET file_count = ? WHERE id = ?",
-            (count, directory_id),
+            """
+            UPDATE directories
+            SET file_count = (
+                SELECT COUNT(*)
+                FROM files
+                WHERE directory_id = ? AND expires_at >= ?
+            )
+            WHERE id = ?
+            """,
+            (directory_id, time.time(), directory_id),
         )
         conn.commit()
 
@@ -559,9 +568,15 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DE
         max_size_bytes: Maximum file size in bytes (default 500MB)
 
     Raises:
-        ValueError: If the file is too large
+        ValueError: If the file is too large or URL is unsafe
         requests.RequestException: If the download fails
     """
+
+    # Validate URL for SSRF protection
+    is_safe, error_msg = _is_safe_url(url)
+    if not is_safe:
+        logger.warning("url_blocked_ssrf url=%s reason=%s", url, error_msg)
+        raise ValueError(f"URL blocked for security reasons: {error_msg}")
 
     try:
         response = requests.get(url, timeout=timeout, stream=True)
