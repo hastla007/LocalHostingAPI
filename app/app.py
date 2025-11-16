@@ -1215,10 +1215,14 @@ def require_api_auth(response_format: str = "json"):
         def wrapped(*args, **kwargs):
             g.api_key_authenticated = False
             if not api_auth_enabled():
+                # When API auth is disabled, treat as authenticated to skip CSRF checks
+                # This allows programmatic API access without requiring Origin/Referer headers
+                g.api_key_authenticated = True
                 return view(*args, **kwargs)
 
             if ui_auth_enabled() and ui_user_authenticated():
-                g.api_key_authenticated = False
+                # When user is authenticated via UI, treat as authenticated to skip CSRF checks
+                g.api_key_authenticated = True
                 return view(*args, **kwargs)
 
             try:
@@ -4193,6 +4197,87 @@ def metrics():
     else:
         quota_used_percent = None
 
+    # Check if client wants Prometheus format (text/plain)
+    accept_header = request.headers.get("Accept", "")
+    wants_prometheus = (
+        "text/plain" in accept_header or
+        "application/openmetrics-text" in accept_header or
+        request.args.get("format") == "prometheus"
+    )
+
+    if wants_prometheus:
+        # Return Prometheus-compatible metrics
+        metrics_lines = []
+
+        # File metrics
+        metrics_lines.append("# HELP localhosting_files_total Total number of files stored")
+        metrics_lines.append("# TYPE localhosting_files_total gauge")
+        metrics_lines.append(f'localhosting_files_total {storage_stats.get("file_count", 0)}')
+
+        # Storage metrics
+        metrics_lines.append("# HELP localhosting_storage_bytes Total storage used in bytes")
+        metrics_lines.append("# TYPE localhosting_storage_bytes gauge")
+        metrics_lines.append(f'localhosting_storage_bytes {storage_stats.get("total_bytes", 0)}')
+
+        # Directory metrics
+        metrics_lines.append("# HELP localhosting_directories_total Total number of directories")
+        metrics_lines.append("# TYPE localhosting_directories_total gauge")
+        metrics_lines.append(f'localhosting_directories_total {storage_stats.get("directory_count", 0)}')
+
+        # Retention breakdown metrics
+        for category, count in retention_breakdown.items():
+            safe_category = category.replace("-", "_")
+            metrics_lines.append(f'localhosting_files_by_retention{{category="{category}"}} {count}')
+
+        # Upload limiter metrics
+        metrics_lines.append("# HELP localhosting_upload_slots_available Available upload slots")
+        metrics_lines.append("# TYPE localhosting_upload_slots_available gauge")
+        metrics_lines.append(f'localhosting_upload_slots_available {health_checks["upload_limiter"]["available_slots"]}')
+
+        metrics_lines.append("# HELP localhosting_upload_limit_total Total upload slot limit")
+        metrics_lines.append("# TYPE localhosting_upload_limit_total gauge")
+        metrics_lines.append(f'localhosting_upload_limit_total {health_checks["upload_limiter"]["current_limit"]}')
+
+        # Health status metrics (1 = healthy, 0 = unhealthy)
+        db_status = 1 if health_checks.get("database", {}).get("status") == "healthy" else 0
+        metrics_lines.append("# HELP localhosting_database_healthy Database health status")
+        metrics_lines.append("# TYPE localhosting_database_healthy gauge")
+        metrics_lines.append(f'localhosting_database_healthy {db_status}')
+
+        disk_status = 1 if health_checks.get("disk", {}).get("status") == "healthy" else 0
+        metrics_lines.append("# HELP localhosting_disk_healthy Disk health status")
+        metrics_lines.append("# TYPE localhosting_disk_healthy gauge")
+        metrics_lines.append(f'localhosting_disk_healthy {disk_status}')
+
+        # Disk space metrics
+        if "disk" in health_checks and "free_gb" in health_checks["disk"]:
+            metrics_lines.append("# HELP localhosting_disk_free_gb Free disk space in GB")
+            metrics_lines.append("# TYPE localhosting_disk_free_gb gauge")
+            metrics_lines.append(f'localhosting_disk_free_gb {health_checks["disk"]["free_gb"]:.2f}')
+
+            metrics_lines.append("# HELP localhosting_disk_used_gb Used disk space in GB")
+            metrics_lines.append("# TYPE localhosting_disk_used_gb gauge")
+            metrics_lines.append(f'localhosting_disk_used_gb {health_checks["disk"]["used_gb"]:.2f}')
+
+            metrics_lines.append("# HELP localhosting_disk_total_gb Total disk space in GB")
+            metrics_lines.append("# TYPE localhosting_disk_total_gb gauge")
+            metrics_lines.append(f'localhosting_disk_total_gb {health_checks["disk"]["total_gb"]:.2f}')
+
+        # Quota metrics
+        if quota_limit_gb:
+            metrics_lines.append("# HELP localhosting_quota_limit_gb Storage quota limit in GB")
+            metrics_lines.append("# TYPE localhosting_quota_limit_gb gauge")
+            metrics_lines.append(f'localhosting_quota_limit_gb {quota_limit_gb}')
+
+            metrics_lines.append("# HELP localhosting_quota_used_percent Percentage of quota used")
+            metrics_lines.append("# TYPE localhosting_quota_used_percent gauge")
+            metrics_lines.append(f'localhosting_quota_used_percent {quota_used_percent:.2f}')
+
+        response = make_response("\n".join(metrics_lines) + "\n", 200)
+        response.headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
+        return response
+
+    # Return HTML dashboard
     return render_template(
         "metrics.html",
         storage_stats=storage_stats,
