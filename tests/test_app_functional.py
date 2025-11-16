@@ -122,9 +122,12 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         payload = expiry_response.get_json()
         download_path = urlparse(payload["download_url"]).path
 
-        # File should be considered expired immediately and removed on access.
+        # File should be considered expired immediately and blocked on access.
         download_response = self.client.get(download_path)
         self.assertEqual(download_response.status_code, 404)
+
+        # After bug fix: expired files are not deleted inline, so we need to run cleanup
+        self.storage.cleanup_expired_files()
 
         uploads_dir = Path(os.environ["LOCALHOSTING_UPLOADS_DIR"])
         self.assertFalse(any(path.is_file() for path in uploads_dir.rglob("*")))
@@ -454,12 +457,16 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
                 follow_redirects=True,
             )
 
+        # After bug fix: if disk deletion fails, database deletion is rolled back
+        # So the file should still exist in both database and disk
         self.assertEqual(delete_response.status_code, 200)
-        self.assertIn(b"File deleted successfully.", delete_response.data)
-        self.assertIsNone(self.storage.get_file(file_id))
+        self.assertIn(b"File not found", delete_response.data)
+        self.assertIsNotNone(self.storage.get_file(file_id))  # DB record still exists
         self.assertTrue(file_path.exists())
 
+        # Clean up - manually delete the file for test cleanup
         file_path.unlink()
+        self.storage.delete_file(file_id)
 
     def test_cleanup_removes_expired_files_without_request(self):
         upload_response = self.client.post(

@@ -675,6 +675,7 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DE
         logger.warning("url_blocked_ssrf url=%s reason=%s", url, error_msg)
         raise ValueError(f"URL blocked for security reasons: {error_msg}")
 
+    response = None
     try:
         response = requests.get(url, timeout=timeout, stream=True)
         response.raise_for_status()
@@ -728,6 +729,13 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DE
     except requests.RequestException as error:
         logger.error("url_download_failed url=%s error=%s", url, str(error))
         raise
+    finally:
+        # Ensure response is properly closed to prevent resource leaks
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass  # Suppress errors during cleanup
 
 
 def migrate_permanent_storage() -> None:
@@ -955,8 +963,26 @@ def load_config() -> Dict[str, float]:
 def save_config(config: Dict[str, float]) -> None:
     ensure_directories()
     normalized = _normalize_config(config)
-    with CONFIG_PATH.open("w", encoding="utf-8") as config_file:
-        json.dump(normalized, config_file, indent=2)
+
+    # Write to temporary file first for atomic update
+    temp_path = CONFIG_PATH.with_suffix('.tmp')
+    try:
+        with temp_path.open("w", encoding="utf-8") as config_file:
+            json.dump(normalized, config_file, indent=2)
+            config_file.flush()
+            # Ensure data is written to disk
+            os.fsync(config_file.fileno())
+
+        # Atomic rename on POSIX systems (overwrites destination)
+        temp_path.replace(CONFIG_PATH)
+    except Exception:
+        # Clean up temp file if write failed
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def calculate_expiration(retention_hours: float) -> float:
@@ -1208,28 +1234,28 @@ def delete_file(file_id: str) -> bool:
             conn.rollback()
             return False
 
-    removed_from_disk = False
-    if file_path.exists():
-        try:
-            file_path.unlink()
+        # Delete file from disk BEFORE committing the transaction
+        # If disk deletion fails, we rollback the database transaction
+        removed_from_disk = False
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                removed_from_disk = True
+                prune_empty_upload_dirs(file_path.parent)
+            except OSError as error:
+                logger.warning(
+                    "file_delete_disk_failed file_id=%s path=%s error=%s - rolling back transaction",
+                    file_id,
+                    file_path,
+                    error,
+                )
+                conn.rollback()
+                return False
+        else:
             removed_from_disk = True
-            prune_empty_upload_dirs(file_path.parent)
-        except OSError as error:
-            logger.warning(
-                "file_delete_disk_failed file_id=%s path=%s error=%s",
-                file_id,
-                file_path,
-                error,
-            )
-    else:
-        removed_from_disk = True
 
-    if not removed_from_disk:
-        logger.warning(
-            "file_delete_disk_residual file_id=%s path=%s",
-            file_id,
-            file_path,
-        )
+        # Commit only if file was successfully removed from disk
+        conn.commit()
 
     logger.info(
         "file_deleted file_id=%s stored_name=%s original_name=%s",
