@@ -224,17 +224,26 @@ def _load_secret_key() -> str:
 
         # Try to create file exclusively (fails if exists) to avoid race condition
         try:
-            # Use exclusive creation mode to prevent race conditions between workers
-            with open(secret_path, 'x', encoding='utf-8') as f:
-                generated = secrets.token_hex(32)
-                f.write(generated)
-                f.flush()
+            # Use exclusive creation mode with secure permissions to prevent race conditions
+            # Set permissions atomically during file creation to avoid security window
+            fd = os.open(
+                secret_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600
+            )
+            generated = secrets.token_hex(32)
             try:
-                secret_path.chmod(0o600)
-            except OSError:
-                logging.getLogger("localhosting.config").warning(
-                    "Unable to set secret key permissions for %s", secret_path
-                )
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(generated)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                # Close fd if fdopen failed
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
             logging.warning("Generated new secret key - stored in %s", secret_path)
             return generated
         except FileExistsError:
@@ -247,11 +256,19 @@ def _load_secret_key() -> str:
                 "Secret key file exists but is empty, regenerating"
             )
             generated = secrets.token_hex(32)
-            secret_path.write_text(generated, encoding="utf-8")
+            # Write with secure permissions atomically
+            fd = os.open(secret_path, os.O_WRONLY | os.O_TRUNC, 0o600)
             try:
-                secret_path.chmod(0o600)
-            except OSError:
-                pass
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(generated)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
             return generated
     except OSError as error:
         logging.getLogger("localhosting.config").critical(
@@ -392,6 +409,32 @@ def validate_upload_mimetype(filename: str, declared_type: Optional[str]) -> boo
         return True
 
     return declared_major == guessed_major
+
+
+def is_dangerous_content_type(content_type: Optional[str]) -> bool:
+    """Check if content type is potentially dangerous (executable content)."""
+
+    if not content_type:
+        return False
+
+    content_type_lower = content_type.lower().split(';')[0].strip()
+
+    # Block dangerous executable content types
+    dangerous_types = {
+        'application/x-executable',
+        'application/x-msdownload',
+        'application/x-msdos-program',
+        'application/x-sh',
+        'application/x-csh',
+        'application/x-bat',
+        'application/x-apple-diskimage',
+        'application/vnd.microsoft.portable-executable',
+        'application/x-sharedlib',
+        'application/x-elf',
+        'application/x-dosexec',
+    }
+
+    return content_type_lower in dangerous_types
 
 
 def _secret_fingerprint() -> str:
@@ -1222,9 +1265,8 @@ def require_api_auth(response_format: str = "json"):
         def wrapped(*args, **kwargs):
             g.api_key_authenticated = False
             if not api_auth_enabled():
-                # When API auth is disabled, treat as authenticated to skip CSRF checks
-                # This allows programmatic API access without requiring Origin/Referer headers
-                g.api_key_authenticated = True
+                # When API auth is disabled, still require proper CSRF headers
+                # API clients must include Origin/Referer OR use API keys to bypass CSRF
                 return view(*args, **kwargs)
 
             if ui_auth_enabled() and ui_user_authenticated():
@@ -1491,7 +1533,9 @@ def upload_slot() -> Iterator[bool]:
     try:
         yield acquired
     finally:
-        upload_limiter.release(acquired)
+        # Always release if we acquired a slot
+        if acquired:
+            upload_limiter.release(True)
 
 
 @app.before_request
@@ -2538,6 +2582,20 @@ def fileupload():
                     sanitize_log_value(filename),
                     upload.content_type,
                 )
+            if is_dangerous_content_type(upload.content_type):
+                lifecycle_logger.warning(
+                    "upload_blocked_dangerous_content filename=%s content_type=%s",
+                    sanitize_log_value(filename),
+                    upload.content_type,
+                )
+                preflight_failures.append(
+                    {
+                        "filename": filename,
+                        "reason": "dangerous_content_type",
+                        "detail": f"Executable content type '{upload.content_type}' is not allowed",
+                    }
+                )
+                continue
             if max_bytes and upload.content_length and upload.content_length > max_bytes:
                 preflight_failures.append(
                     {
@@ -2630,6 +2688,28 @@ def fileupload():
             stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
             with upload_stream_handler(upload_storage) as upload:
                 try:
+                    # Pre-check quota if Content-Length is available (prevents wasted I/O)
+                    if quota_limit_bytes is not None and upload.content_length:
+                        try:
+                            with quota_lock:
+                                enforce_storage_quota_for_size(upload.content_length)
+                        except StorageQuotaExceededError as quota_error:
+                            failures.append(
+                                {
+                                    "filename": filename,
+                                    "reason": "quota_exceeded",
+                                    "detail": "Storage quota exceeded",
+                                }
+                            )
+                            lifecycle_logger.warning(
+                                "upload_quota_precheck_failed filename=%s size=%d usage=%d limit=%d",
+                                sanitize_log_value(filename),
+                                upload.content_length,
+                                quota_error.current_usage,
+                                quota_error.quota_limit,
+                            )
+                            continue
+
                     upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
                     temp_path = upload_path.with_name(f"{upload_path.name}.tmp")
                     if hasattr(upload.stream, "seek"):
@@ -3535,10 +3615,17 @@ def s3_multipart_upload(bucket: str):
 
         # Path validation to prevent traversal attacks
         # Allow forward slashes for S3 hierarchical keys, but block path traversal attempts
-        if ".." in key or "\\" in key or key.startswith("/"):
+        if (
+            ".." in key
+            or "\\" in key
+            or key.startswith("/")
+            or "//" in key
+            or "\x00" in key
+            or key.endswith("/")
+        ):
             return _s3_error_response(
                 "InvalidArgument",
-                "Key contains invalid path components (no path traversal or backslashes allowed)",
+                "Key contains invalid path components (no path traversal, backslashes, null bytes, or multiple slashes allowed)",
                 bucket=bucket,
                 status_code=400,
             )
