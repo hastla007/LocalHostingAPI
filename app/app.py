@@ -219,22 +219,39 @@ def _load_secret_key() -> str:
 
     secret_path = DATA_DIR / ".secret_key"
     try:
-        if secret_path.exists():
+        ensure_directories()
+
+        # Try to create file exclusively (fails if exists) to avoid race condition
+        try:
+            # Use exclusive creation mode to prevent race conditions between workers
+            with open(secret_path, 'x', encoding='utf-8') as f:
+                generated = secrets.token_hex(32)
+                f.write(generated)
+                f.flush()
+            try:
+                secret_path.chmod(0o600)
+            except OSError:
+                logging.getLogger("localhosting.config").warning(
+                    "Unable to set secret key permissions for %s", secret_path
+                )
+            logging.warning("Generated new secret key - stored in %s", secret_path)
+            return generated
+        except FileExistsError:
+            # File was created by another worker, read it
             existing = secret_path.read_text(encoding="utf-8").strip()
             if existing:
                 return existing
-
-        ensure_directories()
-        generated = secrets.token_hex(32)
-        secret_path.write_text(generated, encoding="utf-8")
-        try:
-            secret_path.chmod(0o600)
-        except OSError:
+            # File exists but is empty, try to regenerate (edge case)
             logging.getLogger("localhosting.config").warning(
-                "Unable to set secret key permissions for %s", secret_path
+                "Secret key file exists but is empty, regenerating"
             )
-        logging.warning("Generated new secret key - stored in %s", secret_path)
-        return generated
+            generated = secrets.token_hex(32)
+            secret_path.write_text(generated, encoding="utf-8")
+            try:
+                secret_path.chmod(0o600)
+            except OSError:
+                pass
+            return generated
     except OSError as error:
         logging.getLogger("localhosting.config").critical(
             "SECURITY WARNING: Using in-memory secret key. Sessions will not persist across restarts. "
@@ -271,8 +288,23 @@ def sanitize_log_value(value: Any) -> Any:
     return value
 
 
-def _get_object_size(obj: Any, seen: Optional[Set[int]] = None) -> int:
-    """Recursively calculate approximate size of an object in bytes."""
+def _get_object_size(obj: Any, seen: Optional[Set[int]] = None, depth: int = 0, max_depth: int = 100) -> int:
+    """
+    Recursively calculate approximate size of an object in bytes.
+
+    Args:
+        obj: The object to measure
+        seen: Set of object IDs already visited (prevents cycles)
+        depth: Current recursion depth
+        max_depth: Maximum recursion depth to prevent stack overflow
+
+    Returns:
+        Approximate size in bytes
+    """
+    # Prevent stack overflow with deeply nested objects
+    if depth > max_depth:
+        return sys.getsizeof(obj)
+
     size = sys.getsizeof(obj)
     if seen is None:
         seen = set()
@@ -283,11 +315,11 @@ def _get_object_size(obj: Any, seen: Optional[Set[int]] = None) -> int:
     seen.add(obj_id)
 
     if isinstance(obj, dict):
-        size += sum(_get_object_size(v, seen) for v in obj.values())
-        size += sum(_get_object_size(k, seen) for k in obj.keys())
+        size += sum(_get_object_size(v, seen, depth + 1, max_depth) for v in obj.values())
+        size += sum(_get_object_size(k, seen, depth + 1, max_depth) for k in obj.keys())
     elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
         try:
-            size += sum(_get_object_size(i, seen) for i in obj)
+            size += sum(_get_object_size(i, seen, depth + 1, max_depth) for i in obj)
         except TypeError:
             pass  # Not iterable after all
 
@@ -3332,7 +3364,7 @@ def serve_raw_file(direct_path: str):
             record["id"],
             sanitize_log_value(normalized),
         )
-        delete_file(record["id"])
+        # Don't delete here - let cleanup job handle it to avoid race conditions
         abort(404)
 
     lifecycle_logger.info(
@@ -3417,11 +3449,12 @@ def s3_multipart_upload(bucket: str):
                 )
             key = key.replace("${filename}", substitution)
 
-        # Comprehensive path validation to prevent traversal attacks
-        if any(bad in key for bad in ["..", "/", "\\"]) or key.startswith(("/", "\\")):
+        # Path validation to prevent traversal attacks
+        # Allow forward slashes for S3 hierarchical keys, but block path traversal attempts
+        if ".." in key or "\\" in key or key.startswith("/"):
             return _s3_error_response(
                 "InvalidArgument",
-                "Key contains invalid path components",
+                "Key contains invalid path components (no path traversal or backslashes allowed)",
                 bucket=bucket,
                 status_code=400,
             )
@@ -4748,9 +4781,15 @@ def directories():
     # Batch update file counts to avoid N+1 queries
     directory_ids = [record["id"] for record in directory_records]
     if directory_ids:
+        # Validate directory_ids are strings (from database query, not user input)
+        if not all(isinstance(id, str) for id in directory_ids):
+            lifecycle_logger.error("Invalid directory_ids type in batch update")
+            directory_ids = [str(id) for id in directory_ids if id]
+
         current_time = time.time()
         with get_db() as conn:
             # Get current file counts for all directories in one query
+            # SAFE: placeholders only contains '?' characters, no user input
             placeholders = ",".join("?" * len(directory_ids))
             cursor = conn.execute(
                 f"""

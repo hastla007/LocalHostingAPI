@@ -23,12 +23,14 @@ class Response:
         self._closed = False
 
     def iter_content(self, chunk_size: int = 8192) -> Iterator[bytes]:
-        while True:
-            chunk = self._stream.read(chunk_size)
-            if not chunk:
-                break
-            yield chunk
-        self.close()
+        try:
+            while True:
+                chunk = self._stream.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            self.close()
 
     def raise_for_status(self) -> None:
         if 400 <= int(self.status_code):
@@ -37,7 +39,11 @@ class Response:
     def close(self) -> None:
         if not self._closed:
             try:
-                self._stream.close()
+                if self._stream and hasattr(self._stream, 'close'):
+                    self._stream.close()
+            except Exception:
+                # Suppress cleanup errors to ensure _closed is always set
+                pass
             finally:
                 self._closed = True
 
