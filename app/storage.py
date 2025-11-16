@@ -502,7 +502,8 @@ def list_directories(
 
         if limit is not None:
             limit_value = max(int(limit), 0)
-            offset_value = max(int(offset), 0)
+            # Cap offset at 1 million to prevent performance issues
+            offset_value = max(min(int(offset), 1_000_000), 0)
             base_query += " LIMIT ? OFFSET ?"
             params.extend([limit_value, offset_value])
 
@@ -544,16 +545,40 @@ def delete_directory(directory_id: str) -> bool:
     return True
 
 
-def download_file_from_url(url: str, timeout: int = 30) -> tuple[bytes, Optional[str]]:
-    """Download a file from a URL and return content and content-type."""
+def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 500 * 1024 * 1024) -> tuple[bytes, Optional[str]]:
+    """Download a file from a URL and return content and content-type.
+
+    Args:
+        url: The URL to download from
+        timeout: Request timeout in seconds
+        max_size_bytes: Maximum file size in bytes (default 500MB)
+
+    Raises:
+        ValueError: If the file is too large
+        requests.RequestException: If the download fails
+    """
 
     try:
         response = requests.get(url, timeout=timeout, stream=True)
         response.raise_for_status()
 
+        # Check Content-Length header first if available
+        content_length = response.headers.get("content-length")
+        if content_length and int(content_length) > max_size_bytes:
+            raise ValueError(
+                f"File size ({int(content_length)} bytes) exceeds maximum allowed size ({max_size_bytes} bytes)"
+            )
+
+        # Stream content with size validation
         content = b""
+        total_size = 0
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
+                total_size += len(chunk)
+                if total_size > max_size_bytes:
+                    raise ValueError(
+                        f"File size exceeds maximum allowed size ({max_size_bytes} bytes)"
+                    )
                 content += chunk
 
         content_type = response.headers.get("content-type")
@@ -704,8 +729,7 @@ def _generate_unique_direct_path(
         suffix = f"-{counter}"
         candidate = f"{name}{suffix}{ext}"
         counter += 1
-    if taken_paths is not None:
-        taken_paths.add(candidate)
+    # Note: Do NOT add to taken_paths here - let caller add after successful insert
     return candidate
 
 
@@ -742,6 +766,8 @@ def backfill_direct_paths() -> None:
                 "UPDATE files SET direct_path = ? WHERE id = ?",
                 (direct_path, row["id"]),
             )
+            # Add to taken_paths AFTER successful update
+            taken_paths.add(direct_path)
 
         conn.commit()
 
@@ -839,6 +865,9 @@ def register_file(
                         permanent_flag,
                     ),
                 )
+            # Only add to pending_paths AFTER successful insertion
+            if pending_paths is not None and direct_path:
+                pending_paths.add(direct_path)
             break
         except sqlite3.IntegrityError as error:
             if "direct_path" not in str(error):
@@ -962,7 +991,8 @@ def list_files(
 
         if limit is not None:
             limit_value = max(int(limit), 0)
-            offset_value = max(int(offset), 0)
+            # Cap offset at 1 million to prevent performance issues
+            offset_value = max(min(int(offset), 1_000_000), 0)
             base_query += " LIMIT ? OFFSET ?"
             params.extend([limit_value, offset_value])
 
