@@ -606,8 +606,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
                 "retention_hours": "24",
                 "ui_auth_enabled": "on",
                 "ui_username": "manager",
-                "ui_password": "s3cret!",
-                "ui_password_confirm": "s3cret!",
+                "ui_password": "s3cret!1",
+                "ui_password_confirm": "s3cret!1",
             },
             follow_redirects=True,
         )
@@ -616,7 +616,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
         config = self.storage.load_config()
         self.assertTrue(config["ui_auth_enabled"])
         self.assertEqual(config["ui_username"], "manager")
-        self.assertTrue(check_password_hash(config["ui_password_hash"], "s3cret!"))
+        self.assertTrue(check_password_hash(config["ui_password_hash"], "s3cret!1"))
 
         logout_response = self.client.post("/logout", follow_redirects=False)
         self.assertIn(logout_response.status_code, {301, 302})
@@ -636,7 +636,7 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
 
         good_login = self.client.post(
             "/login",
-            data={"username": "manager", "password": "s3cret!"},
+            data={"username": "manager", "password": "s3cret!1"},
             follow_redirects=True,
         )
         self.assertEqual(good_login.status_code, 200)
