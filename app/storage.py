@@ -1,8 +1,10 @@
 import importlib
 import importlib.util
+import ipaddress
 import json
 import logging
 import os
+import socket
 import sqlite3
 import time
 import hashlib
@@ -10,7 +12,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Generator
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from flask import g, has_request_context
 
@@ -51,22 +53,25 @@ def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
 
-DEFAULT_MAX_UPLOAD_MB = max(1, int(os.environ.get("MAX_UPLOAD_SIZE_MB", "500")))
-DEFAULT_MAX_CONCURRENT_UPLOADS = max(
-    1, int(os.environ.get("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", "10"))
-)
-DEFAULT_CLEANUP_INTERVAL_MINUTES = max(
-    1, int(os.environ.get("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", "5"))
-)
-DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", "100"))
-)
-DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", "10"))
-)
-DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE = max(
-    1, int(os.environ.get("LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", "120"))
-)
+def _safe_int_env(key: str, default: int, min_value: int = 1) -> int:
+    """Safely parse integer environment variable with error handling."""
+    try:
+        return max(min_value, int(os.environ.get(key, str(default))))
+    except (TypeError, ValueError) as e:
+        logger = logging.getLogger("localhosting.config")
+        logger.warning(
+            "Invalid value for %s: %s. Using default: %d",
+            key, os.environ.get(key), default
+        )
+        return default
+
+
+DEFAULT_MAX_UPLOAD_MB = _safe_int_env("MAX_UPLOAD_SIZE_MB", 500)
+DEFAULT_MAX_CONCURRENT_UPLOADS = _safe_int_env("LOCALHOSTING_MAX_CONCURRENT_UPLOADS", 10)
+DEFAULT_CLEANUP_INTERVAL_MINUTES = _safe_int_env("LOCALHOSTING_CLEANUP_INTERVAL_MINUTES", 5)
+DEFAULT_UPLOAD_RATE_LIMIT_PER_HOUR = _safe_int_env("LOCALHOSTING_RATE_LIMIT_UPLOADS_PER_HOUR", 100)
+DEFAULT_LOGIN_RATE_LIMIT_PER_MINUTE = _safe_int_env("LOCALHOSTING_RATE_LIMIT_LOGINS_PER_MINUTE", 10)
+DEFAULT_DOWNLOAD_RATE_LIMIT_PER_MINUTE = _safe_int_env("LOCALHOSTING_RATE_LIMIT_DOWNLOADS_PER_MINUTE", 120)
 
 
 DEFAULT_CONFIG = {
@@ -452,14 +457,18 @@ def update_directory_file_count(directory_id: str) -> None:
     """Update the file count for a directory."""
 
     with get_db() as conn:
-        cursor = conn.execute(
-            "SELECT COUNT(*) as count FROM files WHERE directory_id = ? AND expires_at >= ?",
-            (directory_id, time.time()),
-        )
-        count = cursor.fetchone()["count"]
+        # Use atomic UPDATE with subquery to avoid race conditions
         conn.execute(
-            "UPDATE directories SET file_count = ? WHERE id = ?",
-            (count, directory_id),
+            """
+            UPDATE directories
+            SET file_count = (
+                SELECT COUNT(*)
+                FROM files
+                WHERE directory_id = ? AND expires_at >= ?
+            )
+            WHERE id = ?
+            """,
+            (directory_id, time.time(), directory_id),
         )
         conn.commit()
 
@@ -545,6 +554,65 @@ def delete_directory(directory_id: str) -> bool:
     return True
 
 
+def _is_safe_url(url: str) -> tuple[bool, str]:
+    """Validate URL is not targeting internal or private resources.
+
+    Args:
+        url: The URL to validate
+
+    Returns:
+        Tuple of (is_safe, error_message). If safe, error_message is empty.
+    """
+    try:
+        parsed = urlparse(url)
+
+        # Block non-HTTP(S) schemes
+        if parsed.scheme not in ('http', 'https'):
+            return False, f"Unsupported URL scheme: {parsed.scheme}. Only http and https are allowed."
+
+        # Block missing hostname
+        if not parsed.hostname:
+            return False, "URL must have a valid hostname."
+
+        hostname = parsed.hostname.lower()
+
+        # Block localhost variants
+        localhost_variants = {
+            'localhost', '127.0.0.1', '::1', '0.0.0.0', '0:0:0:0:0:0:0:0',
+            '0000:0000:0000:0000:0000:0000:0000:0001',
+            '::ffff:127.0.0.1', '::ffff:7f00:0001'
+        }
+        if hostname in localhost_variants:
+            return False, f"Access to localhost is not allowed: {hostname}"
+
+        # Resolve and check IP address
+        try:
+            ip_str = socket.gethostbyname(hostname)
+            ip_obj = ipaddress.ip_address(ip_str)
+
+            # Block private ranges
+            if ip_obj.is_private:
+                return False, f"Access to private IP ranges is not allowed: {ip_str}"
+
+            if ip_obj.is_loopback:
+                return False, f"Access to loopback addresses is not allowed: {ip_str}"
+
+            if ip_obj.is_link_local:
+                return False, f"Access to link-local addresses is not allowed: {ip_str}"
+
+            # Block cloud metadata endpoints (AWS, Azure, GCP)
+            if ip_str.startswith('169.254.'):
+                return False, f"Access to cloud metadata endpoints is not allowed: {ip_str}"
+
+        except (socket.gaierror, ValueError) as e:
+            return False, f"Failed to resolve hostname: {hostname}. Error: {str(e)}"
+
+        return True, ""
+
+    except Exception as e:
+        return False, f"URL validation failed: {str(e)}"
+
+
 def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 500 * 1024 * 1024) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type.
 
@@ -554,9 +622,15 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 50
         max_size_bytes: Maximum file size in bytes (default 500MB)
 
     Raises:
-        ValueError: If the file is too large
+        ValueError: If the file is too large or URL is unsafe
         requests.RequestException: If the download fails
     """
+
+    # Validate URL for SSRF protection
+    is_safe, error_msg = _is_safe_url(url)
+    if not is_safe:
+        logger.warning("url_blocked_ssrf url=%s reason=%s", url, error_msg)
+        raise ValueError(f"URL blocked for security reasons: {error_msg}")
 
     try:
         response = requests.get(url, timeout=timeout, stream=True)
