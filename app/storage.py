@@ -47,6 +47,11 @@ CONFIG_PATH = DATA_DIR / "config.json"
 # the future while remaining within SQLite's supported REAL precision.
 PERMANENT_EXPIRATION = 9_999_999_999.0
 
+# Constants for file operations
+CHUNK_SIZE_BYTES = 1024 * 1024  # 1 MB chunks for streaming
+BYTES_PER_MB = 1024 * 1024
+DEFAULT_MAX_UPLOAD_SIZE_MB = 500
+
 def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
@@ -545,7 +550,7 @@ def delete_directory(directory_id: str) -> bool:
     return True
 
 
-def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 500 * 1024 * 1024) -> tuple[bytes, Optional[str]]:
+def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type.
 
     Args:
@@ -572,7 +577,7 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 50
         # Stream content with size validation
         content = b""
         total_size = 0
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
+        for chunk in response.iter_content(chunk_size=CHUNK_SIZE_BYTES):
             if chunk:
                 total_size += len(chunk)
                 if total_size > max_size_bytes:
