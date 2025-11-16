@@ -194,7 +194,7 @@ LOG_FILE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB max log file size
 LOG_FILE_BACKUP_COUNT = 3  # Number of log file backups to keep
 BYTES_PER_MB = 1024 * 1024
 DEFAULT_MAX_UPLOAD_SIZE_MB = 500
-PASSWORD_MIN_LENGTH = 8  # Minimum password length for security
+PASSWORD_MIN_LENGTH = 12  # Minimum password length for security
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
@@ -625,15 +625,28 @@ def validate_password_strength(password: str) -> tuple[bool, Optional[str]]:
     if len(password) < PASSWORD_MIN_LENGTH:
         return False, f"Password must be at least {PASSWORD_MIN_LENGTH} characters long"
 
-    # Check for at least one letter and one number for better security
-    has_letter = any(c.isalpha() for c in password)
+    # Check for uppercase, lowercase, digit, and special character
+    has_upper = any(c.isupper() for c in password)
+    has_lower = any(c.islower() for c in password)
     has_digit = any(c.isdigit() for c in password)
+    has_special = any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in password)
 
-    if not has_letter:
-        return False, "Password must contain at least one letter"
+    if not has_upper:
+        return False, "Password must contain at least one uppercase letter"
+
+    if not has_lower:
+        return False, "Password must contain at least one lowercase letter"
 
     if not has_digit:
         return False, "Password must contain at least one number"
+
+    if not has_special:
+        return False, "Password must contain at least one special character (!@#$%^&*()_+-=[]{}|;:,.<>?)"
+
+    # Check against common weak passwords
+    common_weak = ['password', '12345678', 'qwerty', 'admin', 'letmein', 'welcome', 'monkey', 'dragon']
+    if password.lower() in common_weak:
+        return False, "This password is too common. Please choose a stronger password."
 
     return True, None
 
@@ -2437,6 +2450,7 @@ def login():
             session.modified = True
             session["ui_authenticated"] = True
             session["ui_username"] = expected_username
+            session["last_activity"] = time.time()  # Track session age
             flash("Logged in successfully.", "success")
             return redirect(old_next or url_for("hosting"))
 
@@ -2611,16 +2625,27 @@ def fileupload():
                             pass
                     written = 0
                     too_large = False
-                    with temp_path.open("wb") as destination:
-                        while True:
-                            chunk = upload.stream.read(CHUNK_SIZE_BYTES)
-                            if not chunk:
-                                break
-                            if max_bytes and written + len(chunk) > max_bytes:
-                                too_large = True
-                                break
-                            destination.write(chunk)
-                            written += len(chunk)
+                    # Set restrictive umask for temp file creation
+                    old_umask = os.umask(0o077)
+                    try:
+                        with temp_path.open("wb") as destination:
+                            # Set file permissions to be read/write for owner only
+                            try:
+                                temp_path.chmod(0o600)
+                            except OSError:
+                                pass
+
+                            while True:
+                                chunk = upload.stream.read(CHUNK_SIZE_BYTES)
+                                if not chunk:
+                                    break
+                                if max_bytes and written + len(chunk) > max_bytes:
+                                    too_large = True
+                                    break
+                                destination.write(chunk)
+                                written += len(chunk)
+                    finally:
+                        os.umask(old_umask)
 
                     if too_large:
                         if temp_path and temp_path.exists():
@@ -2827,7 +2852,11 @@ def download(file_id: str):
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
         # Delete expired file since it's already inaccessible
-        delete_file(file_id)
+        try:
+            if not delete_file(file_id):
+                lifecycle_logger.warning("failed_to_delete_expired_file file_id=%s", file_id)
+        except Exception as e:
+            lifecycle_logger.exception("exception_deleting_expired_file file_id=%s error=%s", file_id, str(e))
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
@@ -2843,6 +2872,14 @@ def download(file_id: str):
             sanitize_log_value(record["stored_name"]),
         )
         abort(404)
+    except (OSError, IOError) as e:
+        lifecycle_logger.exception(
+            "file_download_error file_id=%s stored_name=%s error=%s",
+            file_id,
+            sanitize_log_value(record["stored_name"]),
+            str(e),
+        )
+        abort(500)
 
 
 @app.route("/files/<file_id>/<path:filename>")
@@ -3317,11 +3354,24 @@ def serve_raw_file(direct_path: str):
 
     try:
         decoded = unquote(normalized)
+        # Double decode to catch double-encoded attempts like %252e%252e
+        decoded = unquote(decoded)
     except Exception:
         abort(400)
 
     normalized = decoded.strip("/")
     if not normalized:
+        abort(404)
+
+    # Check for path traversal patterns (including encoded variations)
+    dangerous_patterns = ['..', '%2e%2e', '%252e%252e', '..\\', '%2e%2e%5c', '%2e%2e%2f', '.%2e']
+    normalized_lower = normalized.lower()
+    if any(pattern in normalized_lower for pattern in dangerous_patterns):
+        lifecycle_logger.warning(
+            "path_traversal_attempt path=%s ip=%s",
+            sanitize_log_value(direct_path),
+            request.remote_addr or "unknown",
+        )
         abort(404)
 
     if "\\" in normalized:

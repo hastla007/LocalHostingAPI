@@ -634,8 +634,15 @@ def _is_safe_url(url: str) -> tuple[bool, Optional[str]]:
         # Additional protection: block certain dangerous hostnames
         dangerous_hostnames = [
             'localhost',
+            '127.0.0.1',
+            '::1',
+            '0.0.0.0',
             'metadata.google.internal',  # GCP metadata service
             '169.254.169.254',  # AWS/Azure metadata service IP
+            '169.254.170.2',  # GCP additional metadata
+            'instance-data',  # OpenStack metadata
+            '::ffff:127.0.0.1',  # IPv4-mapped IPv6 localhost
+            'fd00::',  # IPv6 unique local addresses
         ]
 
         hostname_lower = hostname.lower()
@@ -783,7 +790,16 @@ def get_file_metadata(file_id: str) -> Dict[str, object]:
 
 
 def update_file_metadata(file_id: str, metadata: Dict[str, object]) -> bool:
-    """Update metadata for a file."""
+    """Update metadata for a file with validation."""
+
+    # Validate input metadata type
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "metadata_type_mismatch file_id=%s expected=dict got=%s",
+            file_id,
+            type(metadata).__name__
+        )
+        return False
 
     record = get_file(file_id)
     if not record:
@@ -792,8 +808,18 @@ def update_file_metadata(file_id: str, metadata: Dict[str, object]) -> bool:
     existing = get_file_metadata(file_id)
     existing.update(metadata)
 
+    # Validate metadata size and serializability
+    MAX_METADATA_SIZE = 10 * 1024  # 10KB limit
     try:
         metadata_json = json.dumps(existing)
+        if len(metadata_json) > MAX_METADATA_SIZE:
+            logger.warning(
+                "metadata_size_exceeded file_id=%s size=%d limit=%d",
+                file_id,
+                len(metadata_json),
+                MAX_METADATA_SIZE
+            )
+            return False
     except (TypeError, ValueError) as error:
         logger.warning(
             "metadata_serialize_failed file_id=%s error=%s", file_id, error
@@ -1257,53 +1283,74 @@ def cleanup_orphaned_files() -> int:
     ensure_directories()
     removed = 0
 
-    with get_db() as conn:
-        cursor = conn.execute("SELECT stored_name FROM files")
-        valid_names = {row["stored_name"] for row in cursor.fetchall()}
+    try:
+        with get_db() as conn:
+            cursor = conn.execute("SELECT stored_name FROM files")
+            valid_names = {row["stored_name"] for row in cursor.fetchall()}
 
-    for entry in UPLOADS_DIR.iterdir():
-        if entry.is_file():
-            stored_name = entry.name
-            if stored_name.endswith(".tmp"):
-                continue
+        for entry in UPLOADS_DIR.iterdir():
+            try:
+                if entry.is_file():
+                    stored_name = entry.name
+                    if stored_name.endswith(".tmp"):
+                        continue
 
-            if stored_name not in valid_names:
-                try:
-                    entry.unlink()
-                    removed += 1
-                    logger.info("orphan_file_removed path=%s", entry)
-                except OSError as error:
-                    logger.warning(
-                        "orphan_cleanup_failed path=%s error=%s",
-                        entry,
-                        error,
-                    )
-            continue
+                    if stored_name not in valid_names:
+                        try:
+                            entry.unlink()
+                            removed += 1
+                            logger.info("orphan_file_removed path=%s", entry)
+                        except OSError as error:
+                            logger.warning(
+                                "orphan_cleanup_failed path=%s error=%s",
+                                entry,
+                                error,
+                            )
+                    continue
 
-        if not entry.is_dir():
-            continue
+                if not entry.is_dir():
+                    continue
 
-        for file_path in entry.iterdir():
-            if not file_path.is_file():
-                continue
+                for file_path in entry.iterdir():
+                    try:
+                        if not file_path.is_file():
+                            continue
 
-            stored_name = file_path.name
-            if stored_name.endswith(".tmp"):
-                continue
+                        stored_name = file_path.name
+                        if stored_name.endswith(".tmp"):
+                            continue
 
-            if stored_name not in valid_names:
-                try:
-                    file_path.unlink()
-                    removed += 1
-                    logger.info("orphan_file_removed path=%s", file_path)
-                except OSError as error:
-                    logger.warning(
-                        "orphan_cleanup_failed path=%s error=%s",
-                        file_path,
-                        error,
-                    )
+                        if stored_name not in valid_names:
+                            try:
+                                file_path.unlink()
+                                removed += 1
+                                logger.info("orphan_file_removed path=%s", file_path)
+                            except OSError as error:
+                                logger.warning(
+                                    "orphan_cleanup_failed path=%s error=%s",
+                                    file_path,
+                                    error,
+                                )
+                    except (OSError, PermissionError) as error:
+                        logger.warning(
+                            "orphan_cleanup_entry_failed entry=%s error=%s",
+                            file_path,
+                            error,
+                        )
+            except (OSError, PermissionError) as error:
+                logger.warning(
+                    "orphan_cleanup_dir_failed entry=%s error=%s",
+                    entry,
+                    error,
+                )
 
-        prune_empty_upload_dirs(entry)
+            try:
+                prune_empty_upload_dirs(entry)
+            except (OSError, PermissionError):
+                pass
+
+    except Exception as e:
+        logger.exception("cleanup_orphaned_files_exception error=%s", str(e))
 
     if removed:
         logger.info("orphan_cleanup_completed removed=%d", removed)
