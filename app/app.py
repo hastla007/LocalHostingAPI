@@ -187,7 +187,14 @@ _CONFIG_CACHE_MTIME: float = get_config_mtime()
 _config_lock = threading.RLock()
 quota_lock = threading.RLock()
 
+# Constants for file operations and limits
 PENDING_API_KEY_TTL_SECONDS = 600
+CHUNK_SIZE_BYTES = 1024 * 1024  # 1 MB chunks for streaming
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024  # 5 MB max log file size
+LOG_FILE_BACKUP_COUNT = 3  # Number of log file backups to keep
+BYTES_PER_MB = 1024 * 1024
+DEFAULT_MAX_UPLOAD_SIZE_MB = 500
+PASSWORD_MIN_LENGTH = 8  # Minimum password length for security
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 numeric_level = getattr(logging, LOG_LEVEL, logging.INFO)
@@ -517,25 +524,46 @@ def _get_api_key_serializer() -> Optional[URLSafeSerializer]:
             _api_key_serializer = URLSafeSerializer(
                 get_secret_key_value(), salt="api-key"
             )
-        except Exception:
+        except (TypeError, ValueError) as e:
+            # Log specific serializer initialization errors
+            logging.getLogger("localhosting.security").warning(
+                "api_key_serializer_init_failed: %s", str(e)
+            )
             return None
     return _api_key_serializer
 
 
 def _encrypt_api_key(value: str) -> Optional[str]:
+    """
+    Encrypt an API key for secure storage.
+
+    Returns None only if encryption is explicitly disabled via environment variable.
+    Raises RuntimeError if encryption fails unexpectedly.
+    """
     serializer = _get_api_key_serializer()
     if not serializer:
-        logging.getLogger("localhosting.security").warning(
-            "api_key_encryption_unavailable falling back to plaintext"
-        )
-        return None
+        security_logger = logging.getLogger("localhosting.security")
+        # Check if plaintext storage is explicitly allowed
+        allow_plaintext = os.environ.get("LOCALHOSTING_ALLOW_PLAINTEXT_API_KEYS", "").lower() == "true"
+        if allow_plaintext:
+            security_logger.warning(
+                "api_key_encryption_unavailable: Plaintext storage explicitly allowed via LOCALHOSTING_ALLOW_PLAINTEXT_API_KEYS. "
+                "This is NOT recommended for production use."
+            )
+            return None
+        else:
+            security_logger.error(
+                "api_key_encryption_unavailable: SECRET_KEY not configured and plaintext storage not allowed. "
+                "Set SECRET_KEY environment variable or set LOCALHOSTING_ALLOW_PLAINTEXT_API_KEYS=true to allow plaintext storage (NOT RECOMMENDED)."
+            )
+            raise RuntimeError("API key encryption is unavailable. Configure SECRET_KEY or explicitly allow plaintext storage.")
     try:
         return serializer.dumps(value)
-    except Exception:
+    except Exception as e:
         logging.getLogger("localhosting.security").exception(
-            "api_key_encryption_failed"
+            "api_key_encryption_failed: Unexpected error during API key encryption"
         )
-        return None
+        raise RuntimeError(f"Failed to encrypt API key: {e}") from e
 
 
 def _decrypt_api_key(token: str) -> Optional[str]:
@@ -546,6 +574,32 @@ def _decrypt_api_key(token: str) -> Optional[str]:
         return serializer.loads(token)
     except (BadSignature, ValueError):
         return None
+
+
+def validate_password_strength(password: str) -> tuple[bool, Optional[str]]:
+    """
+    Validate password meets minimum security requirements.
+
+    Returns:
+        (is_valid, error_message) tuple
+    """
+    if not password:
+        return False, "Password cannot be empty"
+
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return False, f"Password must be at least {PASSWORD_MIN_LENGTH} characters long"
+
+    # Check for at least one letter and one number for better security
+    has_letter = any(c.isalpha() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+
+    if not has_letter:
+        return False, "Password must contain at least one letter"
+
+    if not has_digit:
+        return False, "Password must contain at least one number"
+
+    return True, None
 
 
 class RequestAwareLogger:
@@ -603,8 +657,8 @@ def _configure_file_logging() -> Path:
 
     file_handler = RotatingFileHandler(
         log_path,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
+        maxBytes=LOG_FILE_MAX_BYTES,
+        backupCount=LOG_FILE_BACKUP_COUNT,
         encoding="utf-8",
     )
     file_handler.setLevel(numeric_level)
@@ -653,6 +707,12 @@ def _get_log_sources() -> List[dict]:
 
 
 def _load_log_payload(source: dict, *, max_lines: int = MAX_LOG_LINES) -> dict:
+    """
+    Load log file contents efficiently, reading only the last N lines.
+
+    For large files, seeks to end and reads backwards to avoid loading
+    the entire file into memory.
+    """
     path: Path = source["path"]
     try:
         stat = path.stat()
@@ -665,14 +725,33 @@ def _load_log_payload(source: dict, *, max_lines: int = MAX_LOG_LINES) -> dict:
     line_count = 0
     if available:
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                buffer = deque(handle, maxlen=max_lines)
+            # For small files, use simple approach
+            # For large files (>10MB), use efficient tail approach
+            if stat and stat.st_size > 10 * BYTES_PER_MB:
+                # Efficient tail for large files
+                with path.open("rb") as handle:
+                    # Estimate: average line ~100 bytes, read 2x to be safe
+                    bytes_to_read = min(max_lines * 200, stat.st_size)
+                    handle.seek(max(0, stat.st_size - bytes_to_read))
+                    # Read and decode
+                    chunk = handle.read()
+                    text_full = chunk.decode("utf-8", errors="replace")
+                    # Split into lines and take last max_lines
+                    lines = text_full.splitlines(keepends=True)
+                    # Skip first potentially partial line if we didn't start at beginning
+                    if stat.st_size > bytes_to_read and lines:
+                        lines = lines[1:]
+                    buffer = lines[-max_lines:] if len(lines) > max_lines else lines
+                    line_count = len(buffer)
+                    text = "".join(buffer)
+            else:
+                # Simple approach for smaller files
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    buffer = deque(handle, maxlen=max_lines)
+                    line_count = len(buffer)
+                    text = "".join(buffer)
         except OSError:
             available = False
-            buffer = deque()
-        else:
-            line_count = len(buffer)
-            text = "".join(buffer)
 
     payload = {
         "available": available,
@@ -731,7 +810,7 @@ def _apply_upload_limit(config: Dict[str, Any]) -> None:
         size_mb = 0.0
 
     size_mb = max(1.0, size_mb)
-    limit_bytes = int(size_mb * 1024 * 1024)
+    limit_bytes = int(size_mb * BYTES_PER_MB)
     flask_app.config["MAX_CONTENT_LENGTH"] = limit_bytes
     flask_app.config["MAX_UPLOAD_SIZE_MB"] = size_mb
 
@@ -1276,15 +1355,26 @@ def api_rate_limit_string() -> str:
 
 
 app.config["MAX_CONTENT_LENGTH"] = int(
-    _coerce_positive_int(_CONFIG_CACHE.get("max_upload_size_mb"), 500) * 1024 * 1024
+    _coerce_positive_int(_CONFIG_CACHE.get("max_upload_size_mb"), DEFAULT_MAX_UPLOAD_SIZE_MB) * BYTES_PER_MB
 )
-app.config["MAX_UPLOAD_SIZE_MB"] = _CONFIG_CACHE.get("max_upload_size_mb", 500)
+app.config["MAX_UPLOAD_SIZE_MB"] = _CONFIG_CACHE.get("max_upload_size_mb", DEFAULT_MAX_UPLOAD_SIZE_MB)
 app.config["SECRET_KEY"] = get_secret_key_value()
 _session_cookie_secure_override = _get_optional_bool_env("SESSION_COOKIE_SECURE")
 if _session_cookie_secure_override is None:
     app.config["SESSION_COOKIE_SECURE"] = not app.config.get("TESTING", False)
 else:
     app.config["SESSION_COOKIE_SECURE"] = _session_cookie_secure_override
+
+# Warn if HTTPS is not enforced in production
+if not app.config["SESSION_COOKIE_SECURE"] and not app.config.get("TESTING", False):
+    security_logger = logging.getLogger("localhosting.security")
+    security_logger.warning(
+        "SECURITY WARNING: SESSION_COOKIE_SECURE is disabled. "
+        "Cookies will be transmitted over unencrypted HTTP connections. "
+        "This is NOT recommended for production use. "
+        "Enable HTTPS and set SESSION_COOKIE_SECURE=true environment variable."
+    )
+
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=1)
@@ -1827,7 +1917,7 @@ def upload_file_page():
         config=config,
         api_auth_enabled=bool(config.get("api_auth_enabled")),
         api_ui_key=get_ui_api_key(config),
-        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024),
+        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB),
     )
 
 
@@ -2077,6 +2167,11 @@ def settings():
             if password or confirm:
                 if password != confirm:
                     flash("Password confirmation does not match.", "error")
+                    return render_settings_page(proposed)
+                # Validate password strength
+                is_valid, error_msg = validate_password_strength(password)
+                if not is_valid:
+                    flash(error_msg, "error")
                     return render_settings_page(proposed)
                 proposed["ui_password_hash"] = generate_password_hash(password)
 
@@ -2482,7 +2577,7 @@ def fileupload():
                     too_large = False
                     with temp_path.open("wb") as destination:
                         while True:
-                            chunk = upload.stream.read(1024 * 1024)
+                            chunk = upload.stream.read(CHUNK_SIZE_BYTES)
                             if not chunk:
                                 break
                             if max_bytes and written + len(chunk) > max_bytes:
@@ -2890,7 +2985,7 @@ def box_upload_files():
                 try:
                     with temp_path.open("wb") as destination:
                         while True:
-                            chunk = managed_upload.stream.read(1024 * 1024)
+                            chunk = managed_upload.stream.read(CHUNK_SIZE_BYTES)
                             if not chunk:
                                 break
                             destination.write(chunk)
@@ -3668,7 +3763,7 @@ def s3_put_object(bucket: str, key: str):
             try:
                 with temp_path.open("wb") as destination:
                     while True:
-                        chunk = stream.read(1024 * 1024)
+                        chunk = stream.read(CHUNK_SIZE_BYTES)
                         if not chunk:
                             break
                         destination.write(chunk)
@@ -4175,7 +4270,7 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 sanitize_log_value(url),
                 directory_id,
             )
-            max_bytes = app.config.get("MAX_CONTENT_LENGTH") or 500 * 1024 * 1024
+            max_bytes = app.config.get("MAX_CONTENT_LENGTH") or DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB
             content, content_type = download_file_from_url(url, max_size_bytes=max_bytes)
         except ValueError as error:
             # File too large
@@ -4841,7 +4936,7 @@ def upload_to_directory_ui(directory_id: str):
         config=config,
         api_auth_enabled=bool(config.get("api_auth_enabled")),
         api_ui_key=get_ui_api_key(config),
-        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", 500 * 1024 * 1024),
+        max_upload_size=app.config.get("MAX_CONTENT_LENGTH", DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB),
     )
 
 

@@ -49,6 +49,11 @@ CONFIG_PATH = DATA_DIR / "config.json"
 # the future while remaining within SQLite's supported REAL precision.
 PERMANENT_EXPIRATION = 9_999_999_999.0
 
+# Constants for file operations
+CHUNK_SIZE_BYTES = 1024 * 1024  # 1 MB chunks for streaming
+BYTES_PER_MB = 1024 * 1024
+DEFAULT_MAX_UPLOAD_SIZE_MB = 500
+
 def _default_password_hash() -> str:
     return generate_password_hash("localhostingapi")
 
@@ -554,66 +559,7 @@ def delete_directory(directory_id: str) -> bool:
     return True
 
 
-def _is_safe_url(url: str) -> tuple[bool, str]:
-    """Validate URL is not targeting internal or private resources.
-
-    Args:
-        url: The URL to validate
-
-    Returns:
-        Tuple of (is_safe, error_message). If safe, error_message is empty.
-    """
-    try:
-        parsed = urlparse(url)
-
-        # Block non-HTTP(S) schemes
-        if parsed.scheme not in ('http', 'https'):
-            return False, f"Unsupported URL scheme: {parsed.scheme}. Only http and https are allowed."
-
-        # Block missing hostname
-        if not parsed.hostname:
-            return False, "URL must have a valid hostname."
-
-        hostname = parsed.hostname.lower()
-
-        # Block localhost variants
-        localhost_variants = {
-            'localhost', '127.0.0.1', '::1', '0.0.0.0', '0:0:0:0:0:0:0:0',
-            '0000:0000:0000:0000:0000:0000:0000:0001',
-            '::ffff:127.0.0.1', '::ffff:7f00:0001'
-        }
-        if hostname in localhost_variants:
-            return False, f"Access to localhost is not allowed: {hostname}"
-
-        # Resolve and check IP address
-        try:
-            ip_str = socket.gethostbyname(hostname)
-            ip_obj = ipaddress.ip_address(ip_str)
-
-            # Block private ranges
-            if ip_obj.is_private:
-                return False, f"Access to private IP ranges is not allowed: {ip_str}"
-
-            if ip_obj.is_loopback:
-                return False, f"Access to loopback addresses is not allowed: {ip_str}"
-
-            if ip_obj.is_link_local:
-                return False, f"Access to link-local addresses is not allowed: {ip_str}"
-
-            # Block cloud metadata endpoints (AWS, Azure, GCP)
-            if ip_str.startswith('169.254.'):
-                return False, f"Access to cloud metadata endpoints is not allowed: {ip_str}"
-
-        except (socket.gaierror, ValueError) as e:
-            return False, f"Failed to resolve hostname: {hostname}. Error: {str(e)}"
-
-        return True, ""
-
-    except Exception as e:
-        return False, f"URL validation failed: {str(e)}"
-
-
-def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 500 * 1024 * 1024) -> tuple[bytes, Optional[str]]:
+def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type.
 
     Args:
@@ -646,7 +592,7 @@ def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = 50
         # Stream content with size validation
         content = b""
         total_size = 0
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
+        for chunk in response.iter_content(chunk_size=CHUNK_SIZE_BYTES):
             if chunk:
                 total_size += len(chunk)
                 if total_size > max_size_bytes:
