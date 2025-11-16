@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -263,6 +264,29 @@ def sanitize_log_value(value: Any) -> Any:
     return value
 
 
+def _get_object_size(obj: Any, seen: Optional[Set[int]] = None) -> int:
+    """Recursively calculate approximate size of an object in bytes."""
+    size = sys.getsizeof(obj)
+    if seen is None:
+        seen = set()
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    seen.add(obj_id)
+
+    if isinstance(obj, dict):
+        size += sum(_get_object_size(v, seen) for v in obj.values())
+        size += sum(_get_object_size(k, seen) for k in obj.keys())
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+        try:
+            size += sum(_get_object_size(i, seen) for i in obj)
+        except TypeError:
+            pass  # Not iterable after all
+
+    return size
+
+
 def blocked_extensions() -> Set[str]:
     """Return the configured set of blocked file extensions."""
 
@@ -458,6 +482,14 @@ def ensure_same_origin(response_format: str = "json") -> Optional[Response]:
     # non-browser client and skip CSRF validation.
     if not origin and not referer and getattr(g, "api_key_authenticated", False):
         return None
+
+    # Require at least one header (Origin or Referer) when not API authenticated
+    if not origin and not referer:
+        lifecycle_logger.warning(
+            "csrf_blocked_missing_headers path=%s",
+            sanitize_log_value(request.path),
+        )
+        return _reject("Missing Origin or Referer header for CSRF protection")
 
     for candidate in (origin, referer):
         if candidate and candidate != allowed_origin:
@@ -794,7 +826,8 @@ def get_config(refresh: bool = False) -> Dict[str, Any]:
 
         if refresh or _CONFIG_CACHE is None:
             _CONFIG_CACHE = load_config()
-            _CONFIG_CACHE_MTIME = get_config_mtime()
+            # Use already-fetched mtime to avoid race condition
+            _CONFIG_CACHE_MTIME = current_mtime
 
         if has_request_context():
             cached = getattr(g, "_app_config", None)
@@ -2379,13 +2412,13 @@ def fileupload():
                 current_usage = int(
                     get_storage_statistics().get("total_bytes", 0)
                 )
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "upload_quota_exceeded usage=%d limit=%d",
-                    current_usage,
-                    quota_limit_bytes,
-                )
-                return jsonify({"error": "Storage quota exceeded"}), 507
+                if current_usage >= quota_limit_bytes:
+                    lifecycle_logger.warning(
+                        "upload_quota_exceeded usage=%d limit=%d",
+                        current_usage,
+                        quota_limit_bytes,
+                    )
+                    return jsonify({"error": "Storage quota exceeded"}), 507
         payload = request.get_json(silent=True) if request.is_json else None
 
         permanent = False
@@ -2640,7 +2673,7 @@ def download(file_id: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_download_blocked_expired file_id=%s", file_id)
-        delete_file(file_id)
+        # Don't delete here - let cleanup job handle it to avoid race conditions
         abort(404)
     lifecycle_logger.info("file_downloaded file_id=%s", file_id)
     try:
@@ -2683,7 +2716,7 @@ def direct_download(file_id: str, filename: str):
         abort(404)
     if record["expires_at"] < time.time():
         lifecycle_logger.info("file_direct_blocked_expired file_id=%s", file_id)
-        delete_file(file_id)
+        # Don't delete here - let cleanup job handle it to avoid race conditions
         abort(404)
     lifecycle_logger.info("file_direct_downloaded file_id=%s", file_id)
     try:
@@ -2787,12 +2820,12 @@ def box_upload_files():
                 current_usage = int(
                     get_storage_statistics().get("total_bytes", 0)
                 )
-            if current_usage >= quota_limit_bytes:
-                return _box_error(
-                    "storage_quota_exceeded",
-                    "Storage quota exceeded.",
-                    status=507,
-                )
+                if current_usage >= quota_limit_bytes:
+                    return _box_error(
+                        "storage_quota_exceeded",
+                        "Storage quota exceeded.",
+                        status=507,
+                    )
 
         entries = []
         successful_uploads: List[Tuple[str, str]] = []
@@ -3037,7 +3070,11 @@ def box_upload_files():
         if not entries:
             return _box_error("no_valid_files", "No valid files were provided.")
 
-        response = jsonify({"entries": entries, "total_count": len(entries)})
+        # Return single file object directly for compatibility, or entries array for multiple files
+        if len(entries) == 1:
+            response = jsonify(entries[0])
+        else:
+            response = jsonify({"entries": entries, "total_count": len(entries)})
         response.status_code = 201
         return response
 
@@ -3061,7 +3098,7 @@ def box_download_file(file_id: str):
 
     if record["expires_at"] < time.time():
         lifecycle_logger.info("box_download_blocked_expired file_id=%s", file_id)
-        delete_file(file_id)
+        # Don't delete here - let cleanup job handle it to avoid race conditions
         return _box_error("expired", "The requested file has expired.", status=404)
 
     lifecycle_logger.info("file_downloaded_box file_id=%s", file_id)
@@ -3092,7 +3129,7 @@ def box_file_request(file_id: str):
 
     if record["expires_at"] < time.time():
         lifecycle_logger.info("box_file_request_expired file_id=%s", file_id)
-        delete_file(file_id)
+        # Don't delete here - let cleanup job handle it to avoid race conditions
         return _box_error("expired", "The requested file has expired.", status=404)
 
     download_url = url_for("box_download_file", file_id=file_id, _external=True)
@@ -3275,10 +3312,18 @@ def s3_multipart_upload(bucket: str):
             or f"upload-{uuid.uuid4().hex}"
         )
         if "${filename}" in key and upload.filename:
-            substitution = secure_filename(upload.filename) or upload.filename
+            substitution = secure_filename(upload.filename)
+            if not substitution:
+                return _s3_error_response(
+                    "InvalidArgument",
+                    "Filename contains only invalid characters",
+                    bucket=bucket,
+                    status_code=400,
+                )
             key = key.replace("${filename}", substitution)
 
-        if ".." in key or key.startswith("/"):
+        # Comprehensive path validation to prevent traversal attacks
+        if any(bad in key for bad in ["..", "/", "\\"]) or key.startswith(("/", "\\")):
             return _s3_error_response(
                 "InvalidArgument",
                 "Key contains invalid path components",
@@ -3323,19 +3368,19 @@ def s3_multipart_upload(bucket: str):
                 current_usage = int(
                     get_storage_statistics().get("total_bytes", 0)
                 )
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s",
-                    bucket,
-                    sanitize_log_value(key),
-                )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=key,
-                    status_code=507,
-                )
+                if current_usage >= quota_limit_bytes:
+                    lifecycle_logger.warning(
+                        "s3_upload_quota_exceeded bucket=%s key=%s",
+                        bucket,
+                        sanitize_log_value(key),
+                    )
+                    return _s3_error_response(
+                        "InsufficientStorage",
+                        "Storage quota exceeded.",
+                        bucket=bucket,
+                        key=key,
+                        status_code=507,
+                    )
 
         if not validate_upload_mimetype(filename, upload.content_type):
             lifecycle_logger.warning(
@@ -3600,19 +3645,19 @@ def s3_put_object(bucket: str, key: str):
                 current_usage = int(
                     get_storage_statistics().get("total_bytes", 0)
                 )
-            if current_usage >= quota_limit_bytes:
-                lifecycle_logger.warning(
-                    "s3_upload_quota_exceeded bucket=%s key=%s",
-                    bucket,
-                    sanitize_log_value(key),
-                )
-                return _s3_error_response(
-                    "InsufficientStorage",
-                    "Storage quota exceeded.",
-                    bucket=bucket,
-                    key=key,
-                    status_code=507,
-                )
+                if current_usage >= quota_limit_bytes:
+                    lifecycle_logger.warning(
+                        "s3_upload_quota_exceeded bucket=%s key=%s",
+                        bucket,
+                        sanitize_log_value(key),
+                    )
+                    return _s3_error_response(
+                        "InsufficientStorage",
+                        "Storage quota exceeded.",
+                        bucket=bucket,
+                        key=key,
+                        status_code=507,
+                    )
         file_id = str(uuid.uuid4())
         stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{stored_filename}"
         upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
@@ -4838,15 +4883,26 @@ def file_metadata(file_id: str):
     if invalid_keys:
         return jsonify({"error": "Invalid metadata keys"}), 400
 
-    # Validate metadata value sizes (max 1000 characters per field)
+    # Validate metadata value sizes (max 1000 bytes per field, 10KB total)
     MAX_METADATA_FIELD_SIZE = 1000
+    MAX_METADATA_TOTAL_SIZE = 10000
     validated_metadata = {}
+
     for key, value in metadata_payload.items():
-        if isinstance(value, str) and len(value) > MAX_METADATA_FIELD_SIZE:
+        # Check size of each field (handles strings, dicts, lists, etc.)
+        value_size = _get_object_size(value)
+        if value_size > MAX_METADATA_FIELD_SIZE:
             return jsonify({
-                "error": f"Metadata field '{key}' exceeds maximum size of {MAX_METADATA_FIELD_SIZE} characters"
+                "error": f"Metadata field '{key}' is too large ({value_size} bytes, max {MAX_METADATA_FIELD_SIZE} bytes)"
             }), 400
         validated_metadata[key] = value
+
+    # Check total metadata size
+    total_size = _get_object_size(validated_metadata)
+    if total_size > MAX_METADATA_TOTAL_SIZE:
+        return jsonify({
+            "error": f"Total metadata size ({total_size} bytes) exceeds limit of {MAX_METADATA_TOTAL_SIZE} bytes"
+        }), 400
 
     success = update_file_metadata(file_id, validated_metadata)
     if not success:
