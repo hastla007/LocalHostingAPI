@@ -159,6 +159,7 @@ from .storage import (
     delete_directory,
     delete_file,
     download_file_from_url,
+    download_file_from_url_to_path,
     ensure_directories,
     get_db,
     get_directory,
@@ -1191,11 +1192,17 @@ def _extract_api_key_from_request() -> Optional[str]:
 
 
 def _api_auth_error(response_format: str = "json") -> Response:
+    """Return an API authentication error response.
+
+    For authentication failures (missing credentials), HTTP 401 is the correct
+    status code across all formats. HTTP 403 is reserved for authorization
+    failures (invalid credentials).
+    """
     message = "API authentication required."
     if response_format == "box":
         return _box_error("access_denied", message, status=401)
     if response_format == "s3":
-        return _s3_error_response("AccessDenied", message, status_code=403)
+        return _s3_error_response("AccessDenied", message, status_code=401)
     return make_response(jsonify({"error": message}), 401)
 
 
@@ -4210,19 +4217,31 @@ def metrics():
         metrics_lines = []
 
         # File metrics
-        metrics_lines.append("# HELP localhosting_files_total Total number of files stored")
+        metrics_lines.append("# HELP localhosting_files_total Total number of active files stored")
         metrics_lines.append("# TYPE localhosting_files_total gauge")
-        metrics_lines.append(f'localhosting_files_total {storage_stats.get("file_count", 0)}')
+        metrics_lines.append(f'localhosting_files_total {storage_stats.get("active_count", 0)}')
+
+        metrics_lines.append("# HELP localhosting_files_expired Total number of expired files")
+        metrics_lines.append("# TYPE localhosting_files_expired gauge")
+        metrics_lines.append(f'localhosting_files_expired {storage_stats.get("expired_count", 0)}')
 
         # Storage metrics
         metrics_lines.append("# HELP localhosting_storage_bytes Total storage used in bytes")
         metrics_lines.append("# TYPE localhosting_storage_bytes gauge")
         metrics_lines.append(f'localhosting_storage_bytes {storage_stats.get("total_bytes", 0)}')
 
+        metrics_lines.append("# HELP localhosting_storage_active_bytes Storage used by active files in bytes")
+        metrics_lines.append("# TYPE localhosting_storage_active_bytes gauge")
+        metrics_lines.append(f'localhosting_storage_active_bytes {storage_stats.get("active_bytes", 0)}')
+
+        metrics_lines.append("# HELP localhosting_storage_expired_bytes Storage used by expired files in bytes")
+        metrics_lines.append("# TYPE localhosting_storage_expired_bytes gauge")
+        metrics_lines.append(f'localhosting_storage_expired_bytes {storage_stats.get("expired_bytes", 0)}')
+
         # Directory metrics
         metrics_lines.append("# HELP localhosting_directories_total Total number of directories")
         metrics_lines.append("# TYPE localhosting_directories_total gauge")
-        metrics_lines.append(f'localhosting_directories_total {storage_stats.get("directory_count", 0)}')
+        metrics_lines.append(f'localhosting_directories_total {storage_stats.get("directories", 0)}')
 
         # Retention breakdown metrics
         for category, count in retention_breakdown.items():
@@ -4455,6 +4474,10 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
             )
             continue
 
+        file_id = str(uuid.uuid4())
+        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
+        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
+
         try:
             lifecycle_logger.info(
                 "downloading_from_url url=%s directory_id=%s",
@@ -4462,9 +4485,12 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                 directory_id,
             )
             max_bytes = app.config.get("MAX_CONTENT_LENGTH") or DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB
-            content, content_type = download_file_from_url(url, max_size_bytes=max_bytes)
+            # Use streaming download to avoid memory exhaustion on large files
+            size, content_type = download_file_from_url_to_path(
+                url, upload_path, max_size_bytes=max_bytes
+            )
         except ValueError as error:
-            # File too large
+            # File too large or validation error
             lifecycle_logger.warning(
                 "url_download_size_exceeded url=%s error=%s",
                 sanitize_log_value(url),
@@ -4479,6 +4505,9 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                     "detail": str(error),
                 }
             )
+            # Clean up any partial download
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
             continue
         except Exception as error:
             lifecycle_logger.exception(
@@ -4492,16 +4521,12 @@ def _handle_url_uploads(directory_id: str, rename_enabled: bool, config: dict):
                     "detail": str(error),
                 }
             )
+            # Clean up any partial download
+            upload_path.unlink(missing_ok=True)
+            prune_empty_upload_dirs(upload_path.parent)
             continue
 
-        size = len(content)
-
-        file_id = str(uuid.uuid4())
-        stored_name = f"{int(time.time())}_{uuid.uuid4().hex}_{filename}"
-        upload_path = get_storage_path(file_id, stored_name, ensure_parent=True)
-
         try:
-            upload_path.write_bytes(content)
 
             try:
                 with quota_lock:

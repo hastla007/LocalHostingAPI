@@ -3,6 +3,7 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import math
 import os
 import socket
 import sqlite3
@@ -127,8 +128,20 @@ def get_config_mtime() -> float:
 
 
 def _coerce_numeric(value, default):
+    """Coerce a value to float, rejecting NaN and infinity.
+
+    Args:
+        value: Value to coerce to float
+        default: Default value to use if coercion fails
+
+    Returns:
+        Float value or default
+    """
     try:
         coerced = float(value)
+        # Reject NaN and infinity values for security
+        if math.isnan(coerced) or math.isinf(coerced):
+            return float(default)
     except (TypeError, ValueError):
         return float(default)
     return float(coerced)
@@ -656,8 +669,121 @@ def _is_safe_url(url: str) -> tuple[bool, Optional[str]]:
         return False, f"Invalid URL: {str(e)}"
 
 
+def download_file_from_url_to_path(
+    url: str,
+    dest_path: Path,
+    timeout: int = 30,
+    max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB
+) -> tuple[int, Optional[str]]:
+    """Download a file from a URL directly to disk (streaming).
+
+    This function streams the download directly to disk instead of loading
+    the entire file into memory, preventing memory exhaustion on large files.
+
+    Args:
+        url: The URL to download from
+        dest_path: Path where the file should be saved
+        timeout: Request timeout in seconds
+        max_size_bytes: Maximum file size in bytes (default 500MB)
+
+    Returns:
+        Tuple of (file_size_bytes, content_type)
+
+    Raises:
+        ValueError: If the file is too large or URL is unsafe
+        requests.RequestException: If the download fails
+    """
+
+    # Validate URL for SSRF protection
+    is_safe, error_msg = _is_safe_url(url)
+    if not is_safe:
+        logger.warning("url_blocked_ssrf url=%s reason=%s", url, error_msg)
+        raise ValueError(f"URL blocked for security reasons: {error_msg}")
+
+    response = None
+    temp_path = None
+    try:
+        response = requests.get(url, timeout=timeout, stream=True)
+        response.raise_for_status()
+
+        # Check Content-Length header first if available
+        content_length = response.headers.get("content-length")
+        if content_length and int(content_length) > max_size_bytes:
+            raise ValueError(
+                f"File size ({int(content_length)} bytes) exceeds maximum allowed size ({max_size_bytes} bytes)"
+            )
+
+        content_type = response.headers.get("content-type")
+
+        # Validate content type for security
+        if content_type:
+            content_type_lower = content_type.lower().split(';')[0].strip()
+
+            # Block dangerous executable content types
+            dangerous_types = [
+                'application/x-executable',
+                'application/x-msdownload',
+                'application/x-msdos-program',
+                'application/x-sh',
+                'application/x-csh',
+                'application/x-bat',
+                'application/x-apple-diskimage',
+                'application/vnd.microsoft.portable-executable',
+            ]
+
+            if content_type_lower in dangerous_types:
+                logger.warning(
+                    "url_blocked_dangerous_content url=%s content_type=%s",
+                    url,
+                    content_type_lower
+                )
+                raise ValueError(f"Blocked dangerous content type: {content_type_lower}")
+
+        # Stream directly to a temporary file first, then rename atomically
+        temp_path = dest_path.with_suffix(dest_path.suffix + '.tmp')
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        total_size = 0
+        with temp_path.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=CHUNK_SIZE_BYTES):
+                if chunk:
+                    total_size += len(chunk)
+                    if total_size > max_size_bytes:
+                        raise ValueError(
+                            f"File size exceeds maximum allowed size ({max_size_bytes} bytes)"
+                        )
+                    f.write(chunk)
+
+        # Atomically rename the temporary file to the final destination
+        temp_path.rename(dest_path)
+        temp_path = None  # Successfully moved, don't delete in finally
+
+        return total_size, content_type
+
+    except requests.RequestException as error:
+        logger.error("url_download_failed url=%s error=%s", url, str(error))
+        raise
+    finally:
+        # Ensure response is properly closed to prevent resource leaks
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass  # Suppress errors during cleanup
+
+        # Clean up temporary file if it still exists (download failed)
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass  # Suppress errors during cleanup
+
+
 def download_file_from_url(url: str, timeout: int = 30, max_size_bytes: int = DEFAULT_MAX_UPLOAD_SIZE_MB * BYTES_PER_MB) -> tuple[bytes, Optional[str]]:
     """Download a file from a URL and return content and content-type.
+
+    DEPRECATED: This function loads the entire file into memory and should only be used
+    for small files. For large files, use download_file_from_url_to_path() instead.
 
     Args:
         url: The URL to download from

@@ -946,7 +946,8 @@ class LocalHostingAppIntegrationTests(unittest.TestCase):
             data={"file": (io.BytesIO(b"s3"), "s3.txt")},
             content_type="multipart/form-data",
         )
-        self.assertEqual(s3_unauthorized.status_code, 403)
+        # Fixed: S3 should return 401 for authentication failures (not 403)
+        self.assertEqual(s3_unauthorized.status_code, 401)
 
         s3_authorized = self.client.post(
             "/s3/test-bucket",
